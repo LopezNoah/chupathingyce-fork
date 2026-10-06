@@ -64,7 +64,7 @@ fit, Foundation's (66 MB) do not, and some of its surfaces can show the
 wrong pixels there. The Xbox builds (HALO_XBOX_CONSOLE) keep the Xbox's
 cache. */
 
-#if defined(HALO_ANDROID)
+#if defined(HALO_ARM64_GUEST)
 #define HALO_PORT_TEXTURE_CACHE_SIZE 0x2C00000 /* (0x1600000) */
 #elif !defined(HALO_XBOX_CONSOLE)
 #define HALO_PORT_TEXTURE_CACHE_SIZE 0x10000000 /* (0x1600000) */
@@ -85,7 +85,7 @@ dynamic triangles, so the BSP's do not leave the rest of a frame's draws
 none. Only what is drawn changes: nothing reaches the network or the game
 state. Android and the Xbox builds keep the Xbox's. */
 
-#if !defined(HALO_ANDROID) && !defined(HALO_XBOX_CONSOLE)
+#if !defined(HALO_ARM64_GUEST) && !defined(HALO_XBOX_CONSOLE)
 #define HALO_PORT_MAXIMUM_RENDERED_ENVIRONMENT_SURFACES 32767 /* (16384) */
 #define HALO_PORT_MAXIMUM_DYNAMIC_TRIANGLES 65536 /* (32768) */
 #else

@@ -23,7 +23,7 @@ memory_watch.c detects that by write-protecting the pages.
 
 #include <assert.h>
 #include <stdio.h>
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 #define GL_BGRA GL_RGBA
 #endif
 #include <stdlib.h>
@@ -671,7 +671,7 @@ static void bc7_decode_level(const unsigned char *source, unsigned long width, u
 	}
 }
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 /* ---------- DXT decoding, for ES drivers without S3TC (Mali) */
 
 static unsigned long color565(unsigned long value)
@@ -811,7 +811,7 @@ static GLenum compressed_format(unsigned char kind)
 /* debug.texture_dump_directory writes level 0 of every upload as a TGA, read back from GL */
 static void texture_dump(GLenum target, const struct xgpu_texture_description *description)
 {
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	/* ES cannot read textures back */
 	(void)target;
 	(void)description;
@@ -861,7 +861,7 @@ static BOOL upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 	unsigned long *converted;
 	unsigned long face, level;
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	decode_compressed = description->compressed && !xgpu_capabilities.s3tc;
 #endif
 	if (information.kind == _texel_bc7)
@@ -883,7 +883,7 @@ static BOOL upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 	{
 		GLint channels[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 		/* converted texels are BGRA in memory (32-bit ARGB words); ES takes
 		RGBA */
 		if (converted)
@@ -954,7 +954,7 @@ static BOOL upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 					bc7_decode_level(source, (unsigned long)width, (unsigned long)height, (unsigned long)depth,
 						converted);
 				else
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 				if (decode_compressed)
 					dxt_decode_level(information.kind, source, (unsigned long)width, (unsigned long)height,
 						(unsigned long)depth, converted);
@@ -1107,7 +1107,7 @@ static uint64_t texture_gpu_size_estimate(const struct xgpu_texture_description 
 	unsigned long level;
 	BOOL gpu_compressed = description->compressed;
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	if (!xgpu_capabilities.s3tc)
 		gpu_compressed = FALSE;
 #endif
