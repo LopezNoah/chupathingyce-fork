@@ -62,6 +62,8 @@ EXPAT_DIR = Path("port/third_party/expat")
 EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")
 KCP_DIR = Path("port/third_party/kcp")
 QRCODEGEN_DIR = Path("port/third_party/qrcodegen")
+# internet play's DTLS with browsers (port/linux/src/posix_dtls.c, in the host)
+MBEDTLS_DIR = Path("port/third_party/mbedtls")
 MONOCYPHER_DIR = Path("port/third_party/monocypher")
 # the port's zlib (port/third_party/zlib/zlib_prefixed.h): what inflates the
 # maps, the menus' and the HUD's PNGs and the updates, data from anywhere,
@@ -644,17 +646,19 @@ def generate_android_build(n: Writer, sln: Any) -> None:
                 variables={"cflags": miniupnpc_cflags + (" -w" if source.name != "posix_upnp.c" else "")})
         host_objects.append(obj)
     # the game list's requests (posix_browser.c, with port/third_party/mbedtls
-    # and Android's certificate authorities), as the other posix_*.c in the
+    # and Android's certificate authorities) and internet play's DTLS with
+    # browsers (posix_dtls.c, in every build), as the other posix_*.c in the
     # host
-    if getattr(sln, "game_browser", False):
-        mbedtls_cflags = " ".join([host_cflags, *game_browser_defines(sln), f"-I{MBEDTLS_DIR / 'include'}"])
-        for source in [LINUX_DIR / "src" / "posix_browser.c", *sorted((MBEDTLS_DIR / "library").glob("*.c"))]:
-            obj = host_obj_dir / ("mbedtls_" + source.name + ".o" if source.parent.parent == MBEDTLS_DIR
-                                  else source.name + ".o")
-            n.build(outputs=obj, rule="android_host_cc", inputs=source,
-                    variables={"cflags": mbedtls_cflags + (f" -I{MBEDTLS_DIR / 'library'} -w"
-                                                           if source.name != "posix_browser.c" else "")})
-            host_objects.append(obj)
+    mbedtls_cflags = " ".join([host_cflags, *game_browser_defines(sln), f"-I{MBEDTLS_DIR / 'include'}"])
+    browser_sources = [LINUX_DIR / "src" / "posix_browser.c"] if getattr(sln, "game_browser", False) else []
+    for source in [*browser_sources, LINUX_DIR / "src" / "posix_dtls.c", *sorted((MBEDTLS_DIR / "library").glob("*.c"))]:
+        obj = host_obj_dir / ("mbedtls_" + source.name + ".o" if source.parent.parent == MBEDTLS_DIR
+                              else source.name + ".o")
+        n.build(outputs=obj, rule="android_host_cc", inputs=source,
+                variables={"cflags": mbedtls_cflags + (f" -I{MBEDTLS_DIR / 'library'} -w"
+                                                       if source.name not in ("posix_browser.c", "posix_dtls.c")
+                                                       else "")})
+        host_objects.append(obj)
     table_obj = host_obj_dir / "host_import_table.c.o"
     n.build(outputs=table_obj, rule="android_host_cc", inputs=host_table_c, variables={"cflags": host_cflags})
     host_objects.append(table_obj)

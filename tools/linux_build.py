@@ -551,7 +551,7 @@ def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags:
     for source in sorted(platform_dir.glob("*.c")):
         if source.as_posix() in units.excluded:
             continue
-        if source.name in ("posix_update.c", "posix_browser.c"):
+        if source.name in ("posix_update.c", "posix_browser.c", "posix_dtls.c"):
             add_object(source, f"{posix_cflags} {mbedtls_include}", posix=True)
         elif source.name == "posix_upnp.c":
             add_object(source, f"{posix_cflags} -I{MINIUPNPC_DIR / 'include'} -DMINIUPNP_STATICLIB", posix=True)
@@ -581,7 +581,8 @@ def linux32_objects(n: Writer, units: Linux32Units, obj_dir: Path, extra_cflags:
         add_object(source, platform_cflags)
     for source in units.native_sources:
         add_object(source, posix_cflags, posix=True)
-    # the self-updater's TLS (port/third_party/mbedtls), with the host's
+    # the self-updater's TLS and internet play's DTLS with browsers
+    # (port/third_party/mbedtls), with the host's
     # ABI as the posix_*.c that use it (and no loop turned into glibc's
     # wcslen, which linux_link_check.py rejects: the game's wchar_t is
     # 16-bit)
