@@ -58,6 +58,8 @@ enum
 	_platform_all = _platform_desktop | _platform_android,
 	/* (of the desktop builds, only Windows) */
 	_platform_windows = 4,
+	/* (the web build, which has the desktop's settings, and these) */
+	_platform_web = 8,
 };
 
 struct config_setting
@@ -243,7 +245,7 @@ static const struct config_setting config_settings[] =
 		"OpenCE's build 130: their top octave duller, and images of their band\n"
 		"above it (a brighter, grainier sound)." },
 
-	{ "input.touch_controls", _config_string, "\"on\"", "HALO_TOUCH_CONTROLS", _environment_value, _platform_android,
+	{ "input.touch_controls", _config_string, "\"on\"", "HALO_TOUCH_CONTROLS", _environment_value, _platform_android | _platform_web,
 		"The on-screen touch controls in a game: \"on\" shows them on a\n"
 		"touchscreen (their Hide button hides them for a controller), \"auto\"\n"
 		"only while no controller is connected, \"off\" never. A device without\n"
@@ -691,6 +693,8 @@ static const struct config_setting config_settings[] =
 
 #ifdef HALO_ANDROID
 #define CONFIG_PLATFORM _platform_android
+#elif defined(HALO_WEB)
+#define CONFIG_PLATFORM (_platform_desktop | _platform_web)
 #elif defined(_WIN32)
 #define CONFIG_PLATFORM (_platform_desktop | _platform_windows)
 #else

@@ -152,7 +152,7 @@ int halo_linux_mouse_look(short gamepad_index, float *yaw, float *pitch)
 	mouse_pending_y = 0.0f;
 	mouse_polls_unconsumed = 0;
 	pthread_mutex_unlock(&mouse_lock);
-#ifdef HALO_ANDROID
+#if defined(HALO_ANDROID) || defined(HALO_WEB)
 	/* the touch controls' swipe; it is not the mouse's aiming
 	(halo_linux_mouse_aiming), so a thumb keeps the stick's magnetism */
 	touch_input_look(scale, yaw, pitch);
@@ -1252,7 +1252,7 @@ DWORD WINAPI XInputGetState(HANDLE device, PXINPUT_STATE state)
 			sdl_gamepad_state(gamepads[0], &state->Gamepad);
 		test_input_gamepad(&state->Gamepad);
 		touch_input_gamepad(&state->Gamepad);
-#ifdef HALO_ANDROID
+#if defined(HALO_ANDROID) || defined(HALO_WEB)
 		touch_input_controls(&state->Gamepad, input.menus);
 #endif
 		if (abs(state->Gamepad.sThumbRX) > STICK_AIMING_DEFLECTION ||
@@ -1288,8 +1288,9 @@ DWORD WINAPI XInputSetState(HANDLE device, PXINPUT_FEEDBACK feedback)
 	feedback->Header.dwStatus = ERROR_SUCCESS;
 	if (port < 0)
 		return ERROR_DEVICE_NOT_CONNECTED;
-#ifdef HALO_ANDROID
-	/* the phone vibrates for the touch controls' player */
+#if defined(HALO_ANDROID) || defined(HALO_WEB)
+	/* the phone vibrates for the touch controls' player (in a browser, where
+	it can) */
 	if (port == 0)
 		touch_input_rumble(feedback->Rumble.wLeftMotorSpeed, feedback->Rumble.wRightMotorSpeed);
 #endif
