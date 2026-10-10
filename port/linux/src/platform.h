@@ -164,9 +164,10 @@ the game and Direct3D rely on keeps working. PLATFORM_CONTIGUOUS_BASE is an
 Xbox address. */
 
 #define PLATFORM_CONTIGUOUS_BASE 0x80000000U
-#ifdef HALO_ARM64_GUEST
+#if defined(HALO_ARM64_GUEST) || defined(HALO_WEB)
 /* a 128 MB development kit's: Android's guest image is linked just above it
-(port/android/include/halo_android_abi.h) */
+(port/android/include/halo_android_abi.h), and the web build's WebAssembly
+memory ends with it (tools/web_build.py) */
 #define PLATFORM_CONTIGUOUS_SIZE 0x08000000U
 #else
 /* the desktop builds' (Linux, macOS, Windows): four times a 128 MB

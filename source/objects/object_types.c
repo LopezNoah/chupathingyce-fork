@@ -143,8 +143,8 @@ symbols in this file:
 #include "units/bipeds.h"
 #include "units/units.h"
 #include "units/vehicles.h"
-#ifdef HALO_64BIT
-#include "game/game_engine.h" /* port: game_engine_vehicle_placement_begin, _allowed */
+#if defined(HALO_64BIT) || defined(HALO_WEB)
+#include "game/game_engine.h" /* port: game_engine_vehicle_placement_begin, _allowed (WebAssembly calls them by their types) */
 #endif
 #include "extensions/extension_api.h"
 

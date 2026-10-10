@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # root build script: writes build.ninja for the native ports (Linux, Windows,
-# Android, macOS) and the dedicated server (Linux)
+# Android, macOS), the dedicated server (Linux) and the web port
 
 import argparse
 import io
@@ -17,6 +17,7 @@ from tools.linux64_build import generate_linux64_build, linux64_configure_inputs
 from tools.linux_build import generate_linux_build, linux_configure_inputs
 from tools.macos_build import generate_macos_build, macos_configure_inputs
 from tools.server_build import generate_server_build, server_configure_inputs
+from tools.web_build import generate_web_build, web_configure_inputs
 from tools.version import commit_inputs
 from tools.windows_build import generate_windows_build, windows_configure_inputs
 
@@ -37,7 +38,7 @@ parser.add_argument(
 parser.add_argument(
     "--release",
     action="store_true",
-    help="release builds (Linux, Windows, Android): assertions are not checked",
+    help="release builds (Linux, Windows, Android, web): assertions are not checked",
 )
 parser.add_argument(
     "--game-browser",
@@ -97,6 +98,11 @@ parser.add_argument(
     type=str,
     help="clang with the arm64_32 target for the Android guest (default: clang)",
 )
+parser.add_argument(
+    "--web-emcc",
+    type=str,
+    help="Emscripten's emcc for `ninja web` (default: emcc on the PATH, then EMSDK's or ~/emsdk's)",
+)
 args = parser.parse_args()
 
 # the settings the builds read
@@ -114,6 +120,7 @@ sln = SimpleNamespace(
     port_pgo_profile=args.pgo_profile,
     android_ndk=args.android_ndk,
     android_guest_cc=args.android_guest_cc,
+    web_emcc=args.web_emcc,
 )
 
 
@@ -142,6 +149,7 @@ generate_android_build(n, sln)
 generate_windows_build(n, sln)
 generate_macos_build(n, sln)
 generate_server_build(n, sln)
+generate_web_build(n, sln)
 
 n.comment("Reconfigure on change")
 n.rule(
@@ -168,6 +176,7 @@ n.build(
         *server_configure_inputs(),
         # (the commit the builds record: tools/version.py)
         *commit_inputs(),
+        *web_configure_inputs(),
     ],
 )
 n.newline()

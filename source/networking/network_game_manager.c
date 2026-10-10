@@ -96,9 +96,10 @@ symbols in this file:
 
 #include <xtl.h>
 
-#ifdef HALO_64BIT
-/* (declared for the 64-bit build, which takes no implicit declarations; the
-32-bit build calls it as it did) */
+#if defined(HALO_64BIT) || defined(HALO_WEB)
+/* port: players.c's, called here undeclared; the 64-bit build takes no
+implicit declarations, and WebAssembly cannot call it with another type
+than its own */
 void player_delete(long player_index);
 #endif
 

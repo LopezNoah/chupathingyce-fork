@@ -284,6 +284,7 @@ static void crash_reports_start(void)
 	posix_crash_send();
 }
 #endif
+#endif
 
 BOOL platform_sdl_initialize(void)
 {
@@ -363,9 +364,10 @@ static void show_pointer(BOOL shown)
 #endif
 }
 
-#ifndef HALO_ANDROID
+#if !defined(HALO_ANDROID) && !defined(HALO_WEB)
 
-/* ---------- first start without game data (xbox_files.c) */
+/* ---------- first start without game data (xbox_files.c; the web page
+imports it itself) */
 
 struct data_extraction
 {

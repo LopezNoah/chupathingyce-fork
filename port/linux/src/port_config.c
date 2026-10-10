@@ -743,8 +743,9 @@ static void config_path(char *path, size_t size)
 		return;
 	}
 #endif
-#ifdef HALO_ANDROID
-	/* the data folder, which the app names (port/android/host/host_main.c) */
+#if defined(HALO_ANDROID) || defined(HALO_WEB)
+	/* the data folder, which the app names (port/android/host/host_main.c;
+	on the web, port/web/src/web_main.c) */
 	const char *root = getenv("HALO_DATA_ROOT");
 
 	snprintf(path, size, "%s/config.toml", root && *root ? root : ".");

@@ -386,6 +386,9 @@ symbols in this file:
 #include "networking/network_game_manager.h"
 #include "networking/network_server_manager.h" /* port: a co-op game's level won */
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#ifdef HALO_WEB
+#include <emscripten.h> /* port: the browser runs the main loop (port/web/README.md) */
+#endif
 #include "camera/director.h"
 #include "camera/observer.h"
 #include "cutscene/cinematics.h"
@@ -3004,6 +3007,13 @@ void halt_and_catch_fire(
 	struct rasterizer_frame_begin_parameters frame_parameters;
 	struct rasterizer_window_begin_parameters window_parameters;
 
+#ifdef HALO_WEB
+	/* port: a browser shows only what a frame of its own main loop drew, and
+	this screen never returns to it: the game stops, and the page shows the
+	error from the log, where it already is (port/web/README.md) */
+	emscripten_cancel_main_loop();
+	emscripten_force_exit(EXIT_FAILURE);
+#endif
 	if (!global_screenshot_count.halt_recursion_lock)
 	{
 		scenario = global_scenario_try_and_get();
@@ -3226,11 +3236,30 @@ static void main_game_render(
 	return;
 }
 
+#ifdef HALO_WEB
+/* port: in a browser, the page's frames call the main loop one iteration at a
+time, and what an iteration drew shows once it returns (port/web/README.md) */
+static boolean main_loop_iteration(void);
+
+static void main_loop_web_frame(
+	void)
+{
+	if (!main_loop_iteration())
+	{
+		emscripten_cancel_main_loop();
+		error(_error_silent, "end of saved film");
+		main_exit();
+	}
+}
+#endif
+
 void main_loop(
 	void)
 {
+#ifndef HALO_WEB
 	boolean render_frame;
 	long connection;
+#endif
 
 	if (!game_in_editor())
 	{
@@ -3249,7 +3278,20 @@ void main_loop(
 	main_setup_connection();
 	main_initialize_time();
 
+#ifdef HALO_WEB
+	emscripten_set_main_loop(main_loop_web_frame, 0, TRUE);
+}
+
+static boolean main_loop_iteration(
+	void)
+{
+	boolean render_frame;
+	long connection;
+
+	do
+#else
 	while (TRUE)
+#endif
 	{
 		if (!game_in_editor())
 		{
@@ -3503,12 +3545,21 @@ void main_loop(
 			main_reset_time();
 			main_globals.halt_time_scale = TRUE;
 		}
+#ifdef HALO_WEB
+		return TRUE;
+#endif
 	}
+#ifdef HALO_WEB
+	while (FALSE);
+	/* (a film played to its end) */
+	return FALSE;
+#else
 
 	error(_error_silent, "end of saved film");
 	main_exit();
 
 	return;
+#endif
 }
 
 /* ---------- private code */

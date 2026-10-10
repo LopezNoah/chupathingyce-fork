@@ -271,6 +271,10 @@ static void debug_file_port_write(
 	fprintf(file, "%s%s", prefix, string);
 	fflush(file);
 	debug_file_port_size += (long)(csstrlen(prefix) + csstrlen(string));
+#ifdef HALO_WEB
+	/* port: and to the page's log (port/web/README.md) */
+	fputs(string, stderr);
+#endif
 }
 
 void write_to_error_file(
