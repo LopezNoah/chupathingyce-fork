@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Builds one native port in one configuration, as the GitHub workflow does
+"""Builds one port in one configuration, as the GitHub workflow does
 (.github/workflows/build.yml), and collects what it built into dist/:
 
     python tools/ci_build.py linux debug
     python tools/ci_build.py android release
     python tools/ci_build.py server-x64 release --alpine
     python3 tools/ci_build.py macos-metal release
+    python tools/ci_build.py web release
 
 macos-metal is the macOS application with the Metal renderer
 (configure.py --macos-metal) rather than OpenGL.
@@ -16,6 +17,10 @@ which only make the build slower; release builds use both, as a local
 release build does (profile-guided optimisation needs clang 22 or later,
 and is skipped with an older one). CI_COMPILER_LAUNCHER (ccache, say) is
 passed on as --compiler-launcher.
+
+The web build (port/web/README.md) needs Emscripten (emcc on the PATH, as
+emsdk_env.sh puts it); dist/halo-web-<config>/ is the whole site, which a
+static host serves as it is.
 
 The version comes from the environment (tools/version.py), which
 ChupathingyCE's release workflows set: HALO_VERSION (0.5.0b, or
@@ -73,6 +78,7 @@ OUTPUTS = {
     "server-x86": ["build/server-x86/chupathingyce-server"],
     "server-x64": ["build/server-x64/chupathingyce-server"],
     "server-arm64": ["build/server-arm64/chupathingyce-server"],
+    "web": [],  # the site, below
 }
 # the ninja target of a platform whose name is not its own
 NINJA_TARGETS = {"macos-metal": "macos"}
@@ -128,6 +134,15 @@ def main() -> int:
     print(f"version {version()}{' (a release)' if release_build() else ''}", flush=True)
     run(configure)
 
+    if args.platform == "web":
+        # the whole site (tools/web_build.py), its licences in licenses.txt
+        run(["ninja", "web"])
+        dist = ROOT / "dist" / f"halo-web-{args.config}"
+        if dist.exists():
+            shutil.rmtree(dist)
+        shutil.copytree(ROOT / "build/web/site", dist)
+        print(f"build/web/site -> {dist.relative_to(ROOT)}", flush=True)
+        return 0
     apk_names = {}
     if args.platform == "android":
         # the native part, then the app around it (Gradle's variant of the

@@ -387,7 +387,18 @@ static long current_line(struct reader *reader)
 	return (long)XML_GetCurrentLineNumber(reader->parser);
 }
 
-/* Build-time filtering keeps optional bot widgets out of ordinary builds. */
+/* this build's platform, as the platform attribute names it */
+#ifdef HALO_ANDROID
+#define MENU_PLATFORM "android"
+#elif defined(HALO_WEB)
+#define MENU_PLATFORM "web"
+#else
+#define MENU_PLATFORM "desktop"
+#endif
+
+/* whether the element is for this platform (its platform attribute: the
+platforms it is for, separated by spaces) and build (its feature attribute:
+build-time filtering keeps optional bot widgets out of ordinary builds) */
 static int for_this_platform(struct reader *reader, const XML_Char **attributes)
 {
 	int index;
@@ -398,18 +409,30 @@ static int for_this_platform(struct reader *reader, const XML_Char **attributes)
 	{
 		if (!strcmp(attributes[index], "platform"))
 		{
-			const char *platform = attributes[index + 1];
+			const char *name = attributes[index + 1];
+			int found = 0;
 
-			if (strcmp(platform, "desktop") && strcmp(platform, "android"))
+			while (*name)
 			{
-				reader_error(reader, "platform=\"%s\" is not \"desktop\" or \"android\"", platform);
-				return 1;
+				size_t length = strcspn(name, " ");
+
+				if (length)
+				{
+					if ((length != 7 || strncmp(name, "desktop", 7)) && (length != 7 || strncmp(name, "android", 7)) &&
+						(length != 3 || strncmp(name, "web", 3)))
+					{
+						reader_error(reader, "platform=\"%s\" names one that is not desktop, android or web",
+							attributes[index + 1]);
+						return 1;
+					}
+					if (length == strlen(MENU_PLATFORM) && !strncmp(name, MENU_PLATFORM, length))
+						found = 1;
+				}
+				name += length;
+				while (*name == ' ')
+					name++;
 			}
-#ifdef HALO_ANDROID
-			included = included && !strcmp(platform, "android");
-#else
-			included = included && !strcmp(platform, "desktop");
-#endif
+			included = included && found;
 		}
 		else if (!strcmp(attributes[index], "feature"))
 		{
