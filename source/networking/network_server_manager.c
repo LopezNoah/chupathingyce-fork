@@ -3219,6 +3219,18 @@ boolean server_has_enough_machines(
 	return has_enough_machines;
 }
 
+/* port: a game's one player, with no one else in it yet, may start it:
+a system link or internet game's host, or split screen's first player */
+static boolean server_alone(
+	struct network_game_server *server)
+{
+	return server->game.player_count == 1;
+}
+
+/* port: a machine joining or leaving is in the game before its player is.
+The countdown used to stop for that, and then start over, so a lobby rarely
+finished. The players already in the game decide. A machine with no player
+can join the game in progress. Preserve the port's bounded-change diagnostic. */
 boolean server_ok_to_countdown(
 	struct network_game_server *server)
 {
@@ -3226,33 +3238,27 @@ boolean server_ok_to_countdown(
 	boolean a_player_on_each = server_has_a_player_on_each_machine(server);
 	boolean teams_full = !server_needs_more_teams(server);
 	boolean enough_players = server->game.player_count >= server->game.minimum_players;
-	boolean ok = enough_machines && a_player_on_each && teams_full && enough_players;
+	boolean alone = server_alone(server);
+	boolean ok = enough_machines && (teams_full || alone) && (enough_players || alone);
+	static int last_reason = -1;
+	int reason = (enough_machines ? 0 : 1) | (teams_full || alone ? 0 : 2) |
+		(enough_players || alone ? 0 : 4);
 
-	/* port: a host nobody watches leaves no trace of why its lobby does not
-	start. The reason, logged as it changes (network_event is the engine's
-	log, the host's debug.txt): one letter per condition that fails */
+	if (reason != last_reason)
 	{
-		static int last_reason = -1;
-		int reason = (enough_machines ? 0 : 1) | (a_player_on_each ? 0 : 2) |
-			(teams_full ? 0 : 4) | (enough_players ? 0 : 8);
-
-		if (reason != last_reason)
-		{
-			last_reason = reason;
-			network_event(
-				"lobby countdown %s: machines %s, a player on each machine %s, teams %s, players %ld of %ld, paused %s%s%s%s",
-				ok ? "ready" : "held",
-				enough_machines ? "yes" : "NO",
-				a_player_on_each ? "yes" : "NO",
-				teams_full ? "yes" : "NO",
-				(long)server->game.player_count, (long)server->game.minimum_players,
-				server->countdown_state.paused ? "yes" : "no",
-				reason ? " (failed:" : "",
-				(reason & 1) ? " machines" : "",
-				reason ? ")" : "");
-		}
+		last_reason = reason;
+		network_event(
+			"lobby countdown %s: machines %s, a player on each machine %s, teams %s, players %ld of %ld, paused %s%s%s%s",
+			ok ? "ready" : "held",
+			enough_machines ? "yes" : "NO",
+			a_player_on_each ? "yes" : "NO",
+			teams_full ? "yes" : "NO",
+			(long)server->game.player_count, (long)server->game.minimum_players,
+			server->countdown_state.paused ? "yes" : "no",
+			reason ? " (failed:" : "",
+			(reason & 1) ? " machines" : "",
+			reason ? ")" : "");
 	}
-
 	return ok;
 }
 
@@ -4706,7 +4712,13 @@ static boolean network_game_server_have_all_machines_have_precached(
 
 		if (network_game_server_client_machine_is_joined_to_game(server, machine))
 		{
-			boolean client_has_precached = TEST_FLAG(
+			boolean client_has_precached;
+
+			/* port: a machine with no player is joining or leaving. It does
+			not hold the start; it can join the game in progress. */
+			if (!network_game_server_machine_has_players(server, machine->machine_index))
+				continue;
+			client_has_precached = TEST_FLAG(
 				server->client_machines[i].flags,
 				_network_client_machine_precached_bit);
 
@@ -4782,9 +4794,9 @@ static boolean network_game_server_idle_pregame_tasks(
 					server,
 					client_machine);
 			}
-			/* port: a machine that joined and can add no player (the lobby
-			filled after it joined), or adds none, holds the countdown for
-			ever: refused */
+			/* port: a machine that joined and adds no player (the lobby filled
+			after it joined, or it never adds one) is refused, so it does not
+			stay in the lobby */
 			else if (network_game_server_client_machine_is_joined_to_game(server, client_machine) &&
 				!network_game_server_client_machine_is_local(server, client_machine) &&
 				!network_game_server_machine_has_players(server, client_machine->machine_index) &&
