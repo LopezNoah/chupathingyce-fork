@@ -91,6 +91,10 @@ struct engine_trace_event
 	uint64_t timestamp_nanoseconds;
 	uint64_t argument;
 	void const *payload;
+#if UINTPTR_MAX == UINT32_MAX
+	/* (32-bit builds: the 64-bit builds' pointer width, keeping 32 bytes) */
+	uint32_t payload_padding;
+#endif
 	uint32_t kind;
 	uint32_t value32;
 };

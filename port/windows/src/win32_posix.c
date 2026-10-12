@@ -409,6 +409,22 @@ int clock_gettime(clockid_t clock, struct timespec *time)
 		time->tv_sec = (time_t)(counter.QuadPart / frequency.QuadPart);
 		time->tv_nsec = (long)((counter.QuadPart % frequency.QuadPart) * 1000000000LL / frequency.QuadPart);
 	}
+	else if (clock == CLOCK_PROCESS_CPUTIME_ID || clock == CLOCK_THREAD_CPUTIME_ID)
+	{
+		/* user and kernel time, in 100 ns intervals (posix_frame_stats.c) */
+		FILETIME creation, exit, kernel, user;
+		unsigned long long intervals = 0;
+
+		if (clock == CLOCK_PROCESS_CPUTIME_ID ?
+			GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user) :
+			GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user))
+		{
+			intervals = (((unsigned long long)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime) +
+				(((unsigned long long)user.dwHighDateTime << 32) | user.dwLowDateTime);
+		}
+		time->tv_sec = (time_t)(intervals / 10000000ULL);
+		time->tv_nsec = (long)(intervals % 10000000ULL) * 100;
+	}
 	else
 	{
 		/* 100 ns intervals since 1601 */

@@ -580,11 +580,17 @@ def generate_windows_target(n: Writer, sln: Any, target: WindowsTarget) -> None:
                 # (the game list's requests: on Winsock, with Mbed TLS, as
                 # on Linux)
                 add_object(source, f"{win32_cflags} -I{MBEDTLS_DIR / 'include'}")
-            elif source.name == "posix_ui_font.c":
-                # (the overlay's fonts: stb_truetype; their data, tools/embed_assets.py --fonts)
+            elif source.name in ("posix_ui_font.c", "posix_platform_image.c"):
+                # (the overlay's fonts: stb_truetype; their data, tools/embed_assets.py --fonts;
+                # the 64-bit build's PNG and JPEG decoding: stb_image)
                 add_object(source, f"{platform_cflags} -I{STB_DIR}")
             else:
                 add_object(source, platform_cflags)
+        # the trace's ring and capture (engine/core/trace; posix_trace.c), as
+        # the Linux build has them. The job graph (engine/core/jobs) is not
+        # built: posix_jobs.c, without HALO_JOBS_ENABLED, keeps the jobs off.
+        for source in (Path("engine/core/trace/trace.c"), Path("engine/core/trace/trace_capture.c")):
+            add_object(source, win32_cflags)
         # the game list's TLS (port/third_party/mbedtls; posix_browser.c), on
         # Winsock
         if getattr(sln, "game_browser", False):

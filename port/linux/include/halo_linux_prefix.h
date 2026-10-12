@@ -14,11 +14,11 @@ byte-for-byte identical to what the matching MSVC build compiles.
 #error the Linux port targets 32-bit x86: game data structures assume 32-bit pointers
 #endif
 
-#ifndef HALO_64BIT
-#include <stdint.h>
-#if UINTPTR_MAX == UINT32_MAX
+/* The compiler's own predefine, not <stdint.h>: no host header may be read
+before __NO_INLINE__ and the __inline redefinition below, or glibc's
+extern-inline helpers meet `static __inline__`. */
+#if !defined(HALO_64BIT) && __SIZEOF_POINTER__ == 4
 #define HALO_GAME_ABI_LAYOUT 1
-#endif
 #endif
 
 /* ---------- musl's wide characters (the static dedicated servers,

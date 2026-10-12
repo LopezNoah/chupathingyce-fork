@@ -13,7 +13,6 @@ void platform_log(const char *format, ...) __attribute__((format(printf, 1, 2)))
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/resource.h>
 #include <time.h>
 
 /* 10 minutes at 1000 frames a second; 16 bytes a frame, touched only as used */
@@ -40,12 +39,12 @@ static uint64_t frame_clock_ns(clockid_t clock_id)
 	return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
 }
 
+/* the whole process's CPU time (CLOCK_PROCESS_CPUTIME_ID: user and system,
+   as getrusage gives it, but on every port: Windows's stand-in clocks, and
+   the Android guest's libc, which has no getrusage) */
 static uint64_t frame_process_cpu_us(void)
 {
-	struct rusage usage;
-	getrusage(RUSAGE_SELF, &usage);
-	return (uint64_t)(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000ull +
-		(uint64_t)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+	return frame_clock_ns(CLOCK_PROCESS_CPUTIME_ID) / 1000u;
 }
 
 static void frame_stats_write(void)

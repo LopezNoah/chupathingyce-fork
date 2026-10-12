@@ -7,6 +7,7 @@
 
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define ENGINE_ASSERT_UNLIKELY(condition) (!!(condition))
 
@@ -15,7 +16,12 @@ static inline void engine_assert_fail(char const *condition, char const *file, i
 	fprintf(stderr, "%s:%d: assertion failed: %s\n", file, line, condition);
 	fflush(stderr);
 	raise(SIGABRT);
+#if defined(SIGKILL)
 	raise(SIGKILL);
+#else
+	/* (Windows has no SIGKILL) */
+	abort();
+#endif
 }
 
 #define ENGINE_ASSERT(condition) \
