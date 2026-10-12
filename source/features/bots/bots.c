@@ -497,6 +497,29 @@ static void bot_think(struct bot *bot);
 
 /* ---------- public code */
 
+/* port: one local match configured by the bot lobby, not config.toml. */
+static struct
+{
+	boolean pending;
+	short friendly_count;
+	short enemy_count;
+	short skill;
+} lobby_match;
+static short lobby_friendly_count = NONE;
+
+boolean bots_prepare_local_match(short friendly_count, short enemy_count, short skill)
+{
+	if (friendly_count < 0 || enemy_count < 0 ||
+		friendly_count > BOTS_MAXIMUM || enemy_count > BOTS_MAXIMUM - friendly_count ||
+		skill < 0 || skill >= NUMBEROF(bot_skills))
+		return FALSE;
+	lobby_match.pending = TRUE;
+	lobby_match.friendly_count = friendly_count;
+	lobby_match.enemy_count = enemy_count;
+	lobby_match.skill = skill;
+	return TRUE;
+}
+
 void bots_initialize_for_new_map(
 	void)
 {
@@ -520,6 +543,17 @@ void bots_initialize_for_new_map(
 		if (skill_name && !csstrcasecmp(skill_name, bot_skills[skill_index].name))
 			bots_globals.skill = &bot_skills[skill_index];
 	}
+	/* port: consume the lobby override once, and only for local Slayer.
+	A different next map must not carry these teams into an ordinary host. */
+	lobby_friendly_count = NONE;
+	if (lobby_match.pending && game_connection() == _game_connection_local &&
+		game_engine_get_variant() && game_engine_get_variant()->game_engine_index == game_engine_slayer)
+	{
+		bots_globals.desired_count = lobby_match.friendly_count + lobby_match.enemy_count;
+		bots_globals.skill = &bot_skills[lobby_match.skill];
+		lobby_friendly_count = lobby_match.friendly_count;
+	}
+	lobby_match.pending = FALSE;
 	bots_globals.behavior_valid =
 		engine_ai_behavior_validate(&bot_behavior) == ENGINE_AI_BEHAVIOR_VALID;
 }
@@ -3484,6 +3518,39 @@ static long bots_team_rank(
 	return rank;
 }
 
+/* port: the lobby's friendlies follow controller 1's team; ordinary
+configured bots keep the existing balanced-team policy. */
+static char bots_match_team(short bot_index)
+{
+	struct player_datum *host;
+	short team;
+
+	if (lobby_friendly_count == NONE || !game_engine_has_teams())
+		return bots_choose_team();
+	host = player_try_and_get(local_player_get_player_index(0));
+	team = host && host->team_index >= 0 && host->team_index < 2 ?
+		(short)host->team_index : 0;
+	return (char)(bot_index < lobby_friendly_count ? team : 1 - team);
+}
+
+/* port: local player admission alternates teams even when a network_player
+supplied a team. Restore the lobby's selection after admission, before the
+player is published to the update pipeline or gets a body. */
+static void bots_player_added(long player_index, short bot_index)
+{
+	game_engine_player_added(player_index);
+	if (lobby_friendly_count != NONE && game_connection() == _game_connection_local &&
+		game_engine_has_teams())
+	{
+		struct player_datum *player = player_try_and_get(player_index);
+		if (player)
+		{
+			player->team_index = bots_match_team(bot_index);
+			player->network_player_data.team_index = (char)player->team_index;
+		}
+	}
+}
+
 /* the bot in the slot joins as a player; FALSE if there is no room for it */
 static boolean bot_join(
 	struct bot *bot,
@@ -3503,7 +3570,7 @@ static boolean bot_join(
 	network_player.primary_color_index = (short)((3 + bot_index * 5) % 18);
 	network_player.machine_index = (char)machine_index;
 	network_player.controller_index = (char)(bot_index % MAXIMUM_LOCAL_PLAYERS);
-	network_player.team_index = bots_choose_team();
+	network_player.team_index = bots_match_team(bot_index); /* port: lobby's team counts */
 	network_player.player_list_index = NONE;
 
 	player_index = player_new(machine_index, NONE, NONE, &network_player);
@@ -3511,7 +3578,7 @@ static boolean bot_join(
 		return FALSE;
 	/* (as a player who joins a game in progress:
 	network_game_client_add_player_to_game) */
-	game_engine_player_added(player_index);
+	bots_player_added(player_index, bot_index); /* port: preserve the lobby's team */
 	update_client_add_player(player_index);
 	update_server_add_player(player_index);
 

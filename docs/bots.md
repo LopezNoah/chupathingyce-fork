@@ -88,6 +88,60 @@ combat. The map-wide navigation, vehicle and combat policies still need broader
 testing. Normal spawn selection remains Halo's own; teammate-proximate spawning
 is not forced.
 
+## Bot Match lobby
+
+Build with `python3 configure.py --bots` (keep the default game browser enabled).
+With `display.menus = "xbox"`, open **Multiplayer → Bot Match**. This
+code-rendered setup screen lives in `source/features/bots/bot_lobby.c` and
+uses Online Games' blue overlay style: framed settings, a highlighted row,
+left/right switches, map artwork and a match/team preview. It is not yet an
+entry in the PC/XML menus.
+
+Choose one of the thirteen Xbox multiplayer maps, FFA or Team Slayer,
+friendly/enemy bot counts (31 total at most), Recruit/Marine/ODST/Spartan,
+and map-default or custom starting weapons. Custom loadouts apply to the
+human and bots through the ordinary game variant options. In FFA the friendly
+count is folded into the opponent count. In Team Slayer, friendly bots join
+your player's team and enemies join the other; automatic team balancing is
+disabled for this match so it does not undo the selected counts.
+
+Keyboard arrow keys or the controller's d-pad select rows and change values;
+held directions repeat every 250 ms, as in the other menus. WASD is not the
+recommended menu control. Selector lists wrap left/right (Recruit, Marine,
+ODST, Spartan); counts stop at their capacity limit. Inactive settings are
+greyed out and have no arrows: friendlies in FFA and weapon choices with the
+map-default loadout. Enter/A changes a value or activates START BOT MATCH.
+Controller Start launches directly; Escape/B returns without applying anything.
+Mouse/touch clicks on labels select only, and the switch's left/right halves
+change the value. The footer also has clickable Select, Change and Start/Back.
+At least one bot is required, and missing/incompatible maps are refused before
+launch. The match is local, with one human player and no network server or
+remote joins. Lobby choices override the next map's bot settings only; no
+`config.toml` or debug-test settings are changed. Ordinary configured bots
+retain their balanced-team policy. Auto-fill, objectives, online bots and
+live training controls are not offered by this lobby.
+
+Validation: `ninja macos` and `python3 tools/test_bot_lobby.py` (production
+control, arrow indicators, post-admission team assignment and launch functions
+under ASan/UBSan, including the real main-loop map-change flag). Start must
+queue the shell's map transition: `main_defer_map_map_change()` cancels it and
+previously left the player watching ui.map's ring with no menu.
+
+The asset-backed macOS check drives real keyboard arrows through the Xbox
+menus in a hidden window, then verifies that Battle Creek loads with one
+friendly and two enemy ODST bots. It uses isolated saves/data and keeps each
+run's logs in a fresh artifact directory:
+
+```sh
+python3 tools/check_bot_lobby_live.py --maps /path/to/Xbox/maps
+```
+
+Local player admission normally alternates teams; the bot lobby restores its
+selected teams after admission and before spawning. The live check validates
+this as well as the launch. Manual visual review of the overlay remains useful;
+the game's own frame dumps precede overlay presentation. Android could not be
+built on this host: the configured build has no Android target.
+
 ## Configuration and visible private demo
 
 For the repository executable, a runnable script, all test flags and terminal

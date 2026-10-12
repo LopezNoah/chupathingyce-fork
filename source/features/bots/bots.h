@@ -8,7 +8,13 @@ port: computer-controlled multiplayer players (bots.c).
 #define HALO_GAME_BOTS_H
 #pragma once
 
+#include "cseries/cseries.h" /* port: standalone lobby/controller interface */
+
 /* ---------- prototypes/BOTS.C */
+
+/* port: override config for the next map only. Counts sum to at most 31;
+   skill is recruit (0), marine (1), ODST (2), Spartan (3). */
+boolean bots_prepare_local_match(short friendly_count, short enemy_count, short skill);
 
 /* a new map: no bots, and the map's navigation graph to build again */
 void bots_initialize_for_new_map(
