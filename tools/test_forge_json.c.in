@@ -1,0 +1,186 @@
+/* Forge's file reader (port/linux/game/forge.c) against hostile files. A
+   Forge file is untrusted input: it can be edited or shared. Each case's text
+   is copied into a buffer of exactly its size, so that AddressSanitizer
+   reports any read past the terminator. */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef int boolean;
+typedef float real;
+#define TRUE 1
+#define FALSE 0
+#define NONE (-1L)
+#define SHORT_MAX 32767L
+
+enum
+{
+	FORGE_JSON_MAXIMUM_DEPTH = 32,
+};
+
+/* PRODUCTION_BODIES */
+
+static int failures;
+
+static void check(int condition, char const *what)
+{
+	if (!condition)
+	{
+		fprintf(stderr, "FAIL: %s\n", what);
+		failures++;
+	}
+}
+
+static char *copy(char const *text)
+{
+	size_t size = strlen(text) + 1;
+	char *buffer = malloc(size);
+
+	if (!buffer)
+		abort();
+	memcpy(buffer, text, size);
+	return buffer;
+}
+
+/* skip one value; the error, and what follows it */
+static boolean skip(char const *text, char const **rest)
+{
+	char *buffer = copy(text);
+	struct forge_json json;
+	static char remainder[64];
+
+	json.at = buffer;
+	json.error = FALSE;
+	forge_json_skip(&json);
+	/* (a reader that keeps going after an error must not read further) */
+	forge_json_take(&json, ',');
+	snprintf(remainder, sizeof(remainder), "%s", json.error ? "" : json.at);
+	*rest = remainder;
+	free(buffer);
+	return !json.error;
+}
+
+static boolean string(char const *text, char *out, long size)
+{
+	char *buffer = copy(text);
+	struct forge_json json;
+
+	json.at = buffer;
+	json.error = FALSE;
+	forge_json_string(&json, out, size);
+	forge_json_expect(&json, ':');
+	free(buffer);
+	return !json.error;
+}
+
+static boolean integer(char const *text, long minimum, long maximum, long *value)
+{
+	char *buffer = copy(text);
+	struct forge_json json;
+
+	json.at = buffer;
+	json.error = FALSE;
+	*value = forge_json_integer(&json, minimum, maximum);
+	free(buffer);
+	return !json.error;
+}
+
+static boolean triple(char const *text, real values[3])
+{
+	char *buffer = copy(text);
+	struct forge_json json;
+
+	json.at = buffer;
+	json.error = FALSE;
+	forge_json_triple(&json, values);
+	free(buffer);
+	return !json.error;
+}
+
+static char *nested(long depth, char open, char close)
+{
+	char *text = malloc((size_t)depth * 2 + 1);
+	long index;
+
+	if (!text)
+		abort();
+	for (index = 0; index < depth; index++)
+	{
+		text[index] = open;
+		text[depth * 2 - 1 - index] = close;
+	}
+	text[depth * 2] = 0;
+	return text;
+}
+
+int main(void)
+{
+	char const *rest;
+	char text[32];
+	long value;
+	real values[3];
+	char *deep;
+
+	/* valid values are skipped whole */
+	check(skip("{\"a\": [1, {\"b\": null}, true], \"c\": \"x\\\"y\"} ,z", &rest) && !strcmp(rest, "z"),
+		"nested object skipped");
+	check(skip("[] ,z", &rest) && !strcmp(rest, "z"), "empty array skipped");
+	check(skip("{} ,z", &rest) && !strcmp(rest, "z"), "empty object skipped");
+	check(skip("[[], {}, [[1]]] ,z", &rest) && !strcmp(rest, "z"), "nested empties skipped");
+	check(skip("-1.5e3 ,z", &rest) && !strcmp(rest, "z"), "number skipped");
+
+	/* nesting is bounded, not limited by the C stack */
+	deep = nested(FORGE_JSON_MAXIMUM_DEPTH, '[', ']');
+	check(skip(deep, &rest), "maximum depth accepted");
+	free(deep);
+	deep = nested(FORGE_JSON_MAXIMUM_DEPTH + 1, '[', ']');
+	check(!skip(deep, &rest), "one past maximum depth refused");
+	free(deep);
+	deep = nested(1000000, '[', ']');
+	check(!skip(deep, &rest), "a million levels refused");
+	free(deep);
+
+	/* malformed containers */
+	check(!skip("[1 2]", &rest), "missing comma refused");
+	check(!skip("{\"a\" 1}", &rest), "missing colon refused");
+	check(!skip("[1,", &rest), "unterminated array refused");
+	check(!skip("{\"a\":", &rest), "unterminated object refused");
+	check(!skip("nul", &rest), "short null refused");
+	check(!skip("", &rest), "empty input refused");
+
+	/* strings: escapes, truncation, and the end of the file */
+	check(string("\"a\\u0041b\":", text, sizeof(text)) && !strcmp(text, "aAb"), "ASCII \\u escape read");
+	check(!string("\"\\u00e9\":", text, sizeof(text)), "non-ASCII \\u escape refused");
+	check(!string("\"\\u12\":", text, sizeof(text)), "short \\u escape refused");
+	check(!string("\"\\u12", text, sizeof(text)), "\\u escape at the end refused");
+	check(!string("\"abc\\", text, sizeof(text)), "backslash at the end refused");
+	check(!string("\"abc", text, sizeof(text)), "unterminated string refused");
+	check(string("\"abcdefgh\":", text, 4) && !strcmp(text, "abc"), "long string truncated");
+
+	/* integers are range-checked before conversion */
+	check(integer("42", NONE, SHORT_MAX, &value) && value == 42, "integer read");
+	check(integer("-1", NONE, SHORT_MAX, &value) && value == NONE, "NONE read");
+	check(!integer("-2", NONE, SHORT_MAX, &value), "below minimum refused");
+	check(!integer("40000", NONE, SHORT_MAX, &value), "above maximum refused");
+	check(!integer("1e300", 0, 0x3FFFFFFFL, &value), "huge number refused");
+	check(!integer("1.5", 0, 100, &value), "fraction refused");
+	check(!integer("nan", 0, 100, &value), "nan refused");
+	check(!integer("inf", 0, 100, &value), "inf refused");
+	check(!integer("x", 0, 100, &value), "non-number refused");
+
+	/* reals fit a float */
+	check(triple("[1, -2.5, 3e2]", values) && values[0] == 1.0f && values[1] == -2.5f && values[2] == 300.0f,
+		"triple read");
+	check(!triple("[1, 1e300, 3]", values), "real beyond a float refused");
+	check(!triple("[1, nan, 3]", values), "nan real refused");
+	check(!triple("[1, 2]", values), "short triple refused");
+
+	if (failures)
+	{
+		fprintf(stderr, "%d failure(s)\n", failures);
+		return 1;
+	}
+	printf("forge json: all cases passed\n");
+	return 0;
+}

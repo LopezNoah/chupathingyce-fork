@@ -78,6 +78,7 @@ setting (`game.custom_edition`), checked at run time with
 python -m pytest -q tools/harness tools/test_touch_menu.py   # the engine's functions in a fake world
 python -m pytest -q tools/test_linux_port.py                # the build, the maps' checks (needs assets/maps)
 python -m pytest -q tools/test_cache_file_formats.py tools/test_bmp_files.py tools/test_profile.py
+python -m pytest -q tools/test_forge_json.py                # Forge's file reader against hostile files
 python tools/test_touch_layout.py                           # the Android touch layout (JDK 17+)
 python tools/test_light_storage.py
 python tools/test_death_timing.py
@@ -112,6 +113,29 @@ Running the game without a person at it:
   (`#include "view_fov.h" /* port: port/linux/game/view_fov.c */`).
 - Notes such as `BUG (original, preserved for exact matching)` mark the
   original's bugs. Fixing one is allowed; say so in a `port:` comment.
+
+### New features
+
+New port and feature code (`port/`, `source/features/`, `source/engine_ai/`,
+`source/extensions/`, `engine/`) follows TigerStyle's safety rules, within
+the project's C89 and the rules above:
+
+- No recursion. Every loop, queue, retry, buffer and search has a fixed
+  bound, stated next to it; work per tick is bounded.
+- Fixed capacities chosen in the design, checked before each write, with
+  compile-time checks (`typedef char name[condition ? 1 : -1];`) for the
+  relations between tables, enums and limits.
+- Anything read from a file, a map or another machine is untrusted: check
+  sizes, indices and ranges before use. Check a `double`'s range before
+  converting it to an integer or a `float`; the conversion is undefined
+  outside it.
+- A datum another tick may have deleted is read with `*_try_and_get`, and
+  every pointer that can be `NULL` is checked.
+- Assertions for invariants (they are checked in every build); explicit
+  error paths for operating errors.
+- Tests for the invalid and boundary cases as well as the valid ones,
+  compiled with AddressSanitizer and UndefinedBehaviorSanitizer where they
+  can be (`tools/test_forge_json.py` is an example).
 
 ### The Xbox SDK
 

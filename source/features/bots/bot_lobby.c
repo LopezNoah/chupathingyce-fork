@@ -54,6 +54,9 @@ static char const *const weapons[] = {
     "None", "Random", "Assault Rifle", "Magnum", "Shotgun", "Sniper Rifle",
     "Rocket Launcher", "Plasma Pistol", "Plasma Rifle", "Needler"
 };
+/* The tables above are indexed by the lobby's values: keep them parallel. */
+typedef char bot_lobby_map_frames_check[NUMBEROF(map_frames) == NUMBEROF(maps) ? 1 : -1];
+typedef char bot_lobby_weapons_check[NUMBEROF(weapons) == NUMBER_OF_LOADOUT_WEAPONS ? 1 : -1];
 static char const *const labels[ROWS] = {
     "MAP", "GAME MODE", "FRIENDLY BOTS", "ENEMY BOTS", "BOT DIFFICULTY",
     "STARTING LOADOUT", "PRIMARY WEAPON", "SECONDARY WEAPON"
@@ -96,7 +99,7 @@ static boolean row_mutable(short row)
 
 static void change(short direction)
 {
-    short maximum[ROWS] = { NUMBEROF(maps) - 1, 1, 31, 31, 3, 1,
+    short maximum[ROWS] = { NUMBEROF(maps) - 1, 1, 31, 31, NUMBEROF(skills) - 1, 1,
         NUMBER_OF_LOADOUT_WEAPONS - 1, NUMBER_OF_LOADOUT_WEAPONS - 1 };
     short row = lobby.row;
     if (!row_mutable(row)) return;

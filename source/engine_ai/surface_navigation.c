@@ -631,6 +631,8 @@ void sn_route_straighten(struct sn_route *route, const struct sn_resource *r)
         if (turn(apex,right,q)>=0.f) {
             if (same_point(apex,right) || turn(apex,left,q)<0.f) { right=q; right_step=i; }
             else {
+                /* (a corner beyond capacity: keep the original route) */
+                if (out.count>=SN_WAYPOINTS_MAX-1) return;
                 append(&out,left,route->corridor[left_step<steps ? left_step : steps-1],
                     left_step<steps ? left_step : steps-1);
                 apex=right=left; apex_step=right_step=left_step;
@@ -641,6 +643,7 @@ void sn_route_straighten(struct sn_route *route, const struct sn_resource *r)
         if (turn(apex,left,l)<=0.f) {
             if (same_point(apex,left) || turn(apex,right,l)>0.f) { left=l; left_step=i; }
             else {
+                if (out.count>=SN_WAYPOINTS_MAX-1) return;
                 append(&out,right,route->corridor[right_step<steps ? right_step : steps-1],
                     right_step<steps ? right_step : steps-1);
                 apex=left=right; apex_step=left_step=right_step;

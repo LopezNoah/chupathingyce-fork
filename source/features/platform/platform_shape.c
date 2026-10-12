@@ -121,9 +121,11 @@ void platform_shape_rotation(const float rotation[3], float rows[3][3])
     float cy, sy, cp, sp, cr, sr;
     assert(rotation != NULL);
     assert(rows != NULL);
-    cy = cosf(rotation[0]); sy = sinf(rotation[0]);
-    cp = cosf(rotation[1]); sp = sinf(rotation[1]);
-    cr = cosf(rotation[2]); sr = sinf(rotation[2]);
+    /* port: cos and sin, which halo_math.h makes the same on every machine;
+     * the C library's cosf and sinf are not (AGENTS.md, "Building"). */
+    cy = (float)cos(rotation[0]); sy = (float)sin(rotation[0]);
+    cp = (float)cos(rotation[1]); sp = (float)sin(rotation[1]);
+    cr = (float)cos(rotation[2]); sr = (float)sin(rotation[2]);
     /* Halo applies yaw, then pitch, then roll: Rx(roll) Ry(-pitch) Rz(yaw).
      * Its matrix stores columns; these rows can also be uploaded to GLSL. */
     rows[0][0] = cy * cp;

@@ -143,6 +143,13 @@ enum
 	BOT_VEHICLE_PICKUP_SCAN_TICKS = TICKS_PER_SECOND,
 };
 
+/* the bots' machines stay clear of machine 0 (the host's) and of each other's
+player lists */
+typedef char bot_machines_clear_of_host_check[
+	BOT_MACHINE_INDEX - (BOTS_MAXIMUM - 1) / MAXIMUM_LOCAL_PLAYERS > 0 ? 1 : -1];
+typedef char bot_player_slots_check[
+	BOT_MACHINE_COUNT * MAXIMUM_LOCAL_PLAYERS >= BOTS_MAXIMUM ? 1 : -1];
+
 /* the behavior tree's leaves; a leaf's utility option is its id less one */
 enum
 {
@@ -612,6 +619,12 @@ boolean bots_player_is_bot(
 static real bot_angle_normalize(
 	real angle)
 {
+	/* Bounded: a non-finite angle is no direction, and fmod (exact in IEEE
+	arithmetic, halo_math.h) brings a large one within a turn first, so each
+	loop below runs at most once. */
+	if (!valid_real(angle))
+		return 0.f;
+	angle = (real)fmod(angle, 2.0 * M_PI);
 	while (angle > (real)M_PI)
 		angle -= 2.f * (real)M_PI;
 	while (angle < -(real)M_PI)
@@ -1687,12 +1700,15 @@ static boolean bot_friendly_driver(struct bot *bot, long vehicle_index)
 {
 	struct unit_datum *vehicle = vehicle_try_and_get(vehicle_index);
 	struct unit_datum *driver;
+	struct player_datum const *player = bot_player(bot);
+	struct player_datum const *driver_player;
 
-	if (!game_engine_has_teams() || !vehicle || vehicle->unit.driver_object_index == NONE)
+	if (!player || !game_engine_has_teams() || !vehicle || vehicle->unit.driver_object_index == NONE)
 		return FALSE;
 	driver = bot_living_unit(vehicle->unit.driver_object_index);
-	return driver && driver->unit.player_index != NONE &&
-		player_get(driver->unit.player_index)->team_index == bot_player(bot)->team_index;
+	driver_player = driver && driver->unit.player_index != NONE ?
+		player_try_and_get(driver->unit.player_index) : NULL;
+	return driver_player && driver_player->team_index == player->team_index;
 }
 
 /* port: powerups worth a detour: overshield, camouflage, speed and vision
@@ -2730,8 +2746,9 @@ static boolean bot_weapon_fire(struct bot *bot, struct weapon_trigger_definition
 		trigger->charging_time <= 5.f && !bot->fire_control.pressed &&
 		now >= bot->fire_control.next_press_tick && now >= bot->next_charge_time)
 	{
+		/* (the target may have left since it was seen) */
 		struct player_datum *target = bot->target_player_index != NONE ?
-			player_get(bot->target_player_index) : NULL;
+			player_try_and_get(bot->target_player_index) : NULL;
 		struct unit_datum *target_unit = target ? bot_living_unit(target->unit_index) : NULL;
 		real_point3d origin;
 		real distance;
@@ -3150,6 +3167,7 @@ static void bot_debug_sandbox(struct bot *bot)
 	struct data_iterator iterator;
 	struct player_datum *host = NULL;
 	struct player_datum *player;
+	struct player_datum const *bot_player_datum = bot_player(bot);
 	short driver = NONE;
 	short gunner = NONE;
 	long vehicle_index;
@@ -3159,13 +3177,13 @@ static void bot_debug_sandbox(struct bot *bot)
 	real ground_z;
 
 	if (bots_globals.sandbox_done || bot->slot != 1 || !game_engine_has_teams() ||
-		!config_boolean("debug.bot_sandbox"))
+		!bot_player_datum || !config_boolean("debug.bot_sandbox"))
 		return;
 	data_iterator_new(&iterator, player_data);
 	while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
 	{
 		if (player->local_player_index != NONE && bot_living_unit(player->unit_index) &&
-			player->team_index == bot_player(bot)->team_index)
+			player->team_index == bot_player_datum->team_index)
 		{
 			host = player;
 			break;

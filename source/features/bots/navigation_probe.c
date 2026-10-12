@@ -4,11 +4,11 @@
 #include "game.h"
 #include "navigation_probe.h"
 #include "navigation_world.h"
+#include "math/real_math.h"
 #include "objects/objects.h"
 #include "units/units.h"
 #include "units/biped_definitions.h"
 #include <math.h>
-#include <stdio.h>
 
 #ifdef HALO_FEATURE_BOTS
 
@@ -126,7 +126,7 @@ static void follow(const struct sn_resource *r, long unit, struct sn_point origi
     if (!navigation_world_segment_clear(&unit,origin,probe.route.polygons[probe.waypoint],
         target,probe.route.polygons[probe.waypoint])) return;
     distance=horizontal_distance(origin,target);
-    yaw=atan2f(target.y-origin.y,target.x-origin.x);
+    yaw=arctangent(target.y-origin.y,target.x-origin.x); /* (the game's, not libm's atan2f) */
     action->desired_facing.yaw=yaw; action->desired_facing.pitch=0.f;
     action->throttle.i=MIN(0.7f,distance*2.f);
     action->throttle.j=0.f;

@@ -114,6 +114,12 @@ enum
 	FORGE_MESSAGE_LENGTH = 160,
 	FORGE_FORMAT_VERSION = 1,
 	FORGE_MAXIMUM_WORLD_EDITS = 128,
+	/* a Forge file is untrusted input: values it skips nest at most this deep */
+	FORGE_JSON_MAXIMUM_DEPTH = 32,
+	/* well below LONG_MAX, so that the additions made after a file is read
+	(FORGE_MAXIMUM_ADDITIONS a map) never overflow the next id */
+	FORGE_MAXIMUM_ADDITION_ID = 0x3FFFFFFF,
+	FORGE_MAXIMUM_PLACEMENT_INDEX = 0x7FFF,
 };
 
 enum forge_target_kind
@@ -933,6 +939,9 @@ static boolean forge_json_take(
 	struct forge_json *json,
 	char c)
 {
+	/* (after an error the cursor is not read again) */
+	if (json->error)
+		return FALSE;
 	forge_json_space(json);
 	if (*json->at != c)
 		return FALSE;
@@ -946,6 +955,40 @@ static void forge_json_expect(
 {
 	if (!forge_json_take(json, c))
 		json->error = TRUE;
+}
+
+/* four hex digits of a \u escape, below 0x80 */
+static char forge_json_hex4(
+	struct forge_json *json)
+{
+	long digit_index;
+	long value = 0;
+
+	for (digit_index = 0; digit_index < 4; digit_index++)
+	{
+		char c = *json->at;
+		long digit;
+
+		if (c >= '0' && c <= '9')
+			digit = c - '0';
+		else if (c >= 'a' && c <= 'f')
+			digit = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F')
+			digit = c - 'A' + 10;
+		else
+		{
+			json->error = TRUE;
+			return 0;
+		}
+		value = value * 16 + digit;
+		json->at++;
+	}
+	if (value >= 0x80)
+	{
+		json->error = TRUE;
+		return 0;
+	}
+	return (char)value;
 }
 
 static void forge_json_string(
@@ -962,6 +1005,12 @@ static void forge_json_string(
 
 		if (c == '\\')
 		{
+			/* (a backslash at the end: the cursor stays on the terminator) */
+			if (!*json->at)
+			{
+				json->error = TRUE;
+				return;
+			}
 			c = *json->at++;
 			switch (c)
 			{
@@ -971,18 +1020,11 @@ static void forge_json_string(
 			case 'b': c = '\b'; break;
 			case 'f': c = '\f'; break;
 			case 'u':
-			{
-				long digits;
-
-				/* (only the ASCII ones Forge writes) */
-				c = (char)strtol(json->at, NULL, 16);
-				for (digits = 0; digits < 4 && *json->at; digits++)
-					json->at++;
+				/* (only the ASCII ones Forge writes: exactly four hex digits) */
+				c = forge_json_hex4(json);
+				if (json->error)
+					return;
 				break;
-			}
-			case 0:
-				json->error = TRUE;
-				return;
 			}
 		}
 		if (length < size - 1)
@@ -999,12 +1041,53 @@ static double forge_json_number(
 	char *end;
 	double value;
 
+	if (json->error)
+		return 0.0;
 	forge_json_space(json);
 	value = strtod(json->at, &end);
-	if (end == json->at)
+	/* (strtod also reads "nan" and "inf", which Forge never writes) */
+	if (end == json->at || !isfinite(value))
+	{
 		json->error = TRUE;
+		return 0.0;
+	}
 	json->at = end;
 	return value;
+}
+
+/* a whole number in [minimum, maximum]: checked before the conversion,
+which is undefined for a double outside the integer's range */
+static long forge_json_integer(
+	struct forge_json *json,
+	long minimum,
+	long maximum)
+{
+	double value = forge_json_number(json);
+
+	if (json->error)
+		return minimum;
+	if (value < (double)minimum || value > (double)maximum || floor(value) != value)
+	{
+		json->error = TRUE;
+		return minimum;
+	}
+	return (long)value;
+}
+
+/* a number a real can hold (forge_transform_valid bounds it further) */
+static real forge_json_real(
+	struct forge_json *json)
+{
+	double value = forge_json_number(json);
+
+	if (json->error)
+		return 0.0f;
+	if (fabs(value) > 1.0e30)
+	{
+		json->error = TRUE;
+		return 0.0f;
+	}
+	return (real)value;
 }
 
 static boolean forge_json_boolean(
@@ -1025,57 +1108,86 @@ static boolean forge_json_boolean(
 	return FALSE;
 }
 
+/* an object member's key and colon, ignored */
+static void forge_json_skip_key(
+	struct forge_json *json)
+{
+	char ignored[1];
+
+	forge_json_string(json, ignored, 0);
+	forge_json_expect(json, ':');
+}
+
+/* one value, whatever it is. Iterative, with an explicit stack of the open
+containers' closing characters: a file's nesting cannot exhaust the C stack.
+Each pass reads at least one character or sets the error, so the loop ends
+within the file's length. */
 static void forge_json_skip(
 	struct forge_json *json)
 {
-	forge_json_space(json);
-	switch (*json->at)
-	{
-	case '"':
-	{
-		char ignored[1];
+	char closers[FORGE_JSON_MAXIMUM_DEPTH];
+	long depth = 0;
 
-		forge_json_string(json, ignored, 0);
-		break;
-	}
-	case '{':
-		json->at++;
-		if (forge_json_take(json, '}'))
-			break;
-		do
+	do
+	{
+		if (json->error)
+			return;
+		forge_json_space(json);
+		switch (*json->at)
+		{
+		case '{':
+		case '[':
+			if (depth >= FORGE_JSON_MAXIMUM_DEPTH)
+			{
+				json->error = TRUE;
+				return;
+			}
+			closers[depth++] = *json->at == '{' ? '}' : ']';
+			json->at++;
+			if (forge_json_take(json, closers[depth - 1]))
+			{
+				depth--;
+				break;
+			}
+			if (closers[depth - 1] == '}')
+				forge_json_skip_key(json);
+			/* (then the container's first value) */
+			continue;
+		case '"':
 		{
 			char ignored[1];
 
 			forge_json_string(json, ignored, 0);
-			forge_json_expect(json, ':');
-			forge_json_skip(json);
-		} while (!json->error && forge_json_take(json, ','));
-		forge_json_expect(json, '}');
-		break;
-	case '[':
-		json->at++;
-		if (forge_json_take(json, ']'))
 			break;
-		do
+		}
+		case 't':
+		case 'f':
+			forge_json_boolean(json);
+			break;
+		case 'n':
+			if (!strncmp(json->at, "null", 4))
+				json->at += 4;
+			else
+				json->error = TRUE;
+			break;
+		default:
+			forge_json_number(json);
+			break;
+		}
+		/* after a value: the next member of its container, or the containers
+		that end here */
+		while (!json->error && depth > 0)
 		{
-			forge_json_skip(json);
-		} while (!json->error && forge_json_take(json, ','));
-		forge_json_expect(json, ']');
-		break;
-	case 't':
-	case 'f':
-		forge_json_boolean(json);
-		break;
-	case 'n':
-		if (!strncmp(json->at, "null", 4))
-			json->at += 4;
-		else
-			json->error = TRUE;
-		break;
-	default:
-		forge_json_number(json);
-		break;
-	}
+			if (forge_json_take(json, ','))
+			{
+				if (closers[depth - 1] == '}')
+					forge_json_skip_key(json);
+				break;
+			}
+			forge_json_expect(json, closers[depth - 1]);
+			depth--;
+		}
+	} while (!json->error && depth > 0);
 }
 
 static void forge_json_triple(
@@ -1089,7 +1201,7 @@ static void forge_json_triple(
 	{
 		if (index)
 			forge_json_expect(json, ',');
-		values[index] = (real)forge_json_number(json);
+		values[index] = forge_json_real(json);
 	}
 	forge_json_expect(json, ']');
 }
@@ -1126,11 +1238,11 @@ static void forge_json_entry(
 		if (!strcmp(key, "type"))
 			forge_json_string(json, entry->type, sizeof(entry->type));
 		else if (!strcmp(key, "index"))
-			entry->index = (long)forge_json_number(json);
+			entry->index = forge_json_integer(json, NONE, FORGE_MAXIMUM_PLACEMENT_INDEX);
 		else if (!strcmp(key, "id"))
-			entry->id = (long)forge_json_number(json);
+			entry->id = forge_json_integer(json, 0, FORGE_MAXIMUM_ADDITION_ID);
 		else if (!strcmp(key, "bsp"))
-			entry->bsp = (long)forge_json_number(json);
+			entry->bsp = forge_json_integer(json, NONE, SHORT_MAX);
 		else if (!strcmp(key, "tag"))
 			forge_json_string(json, entry->tag, sizeof(entry->tag));
 		else if (!strcmp(key, "deleted"))
@@ -1262,7 +1374,12 @@ static void forge_load(
 				forge_json_string(&json, map_name, sizeof(map_name));
 			else if (!strcmp(key, "checksum"))
 			{
-				checksum = (unsigned long)forge_json_number(&json);
+				double value = forge_json_number(&json);
+
+				/* (checked before the conversion, which is undefined out of range) */
+				if (!json.error && (value < 0.0 || value > 4294967295.0 || floor(value) != value))
+					json.error = TRUE;
+				checksum = json.error ? 0 : (unsigned long)value;
 				has_checksum = TRUE;
 			}
 			else
