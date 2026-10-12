@@ -11,8 +11,9 @@ for isolated geometry acceptance tests. Forge nav authoring is not implemented.
 ## Modules and contracts
 
 - `source/engine_ai/surface_navigation.*`: dependency-light convex polygon resource,
-  geometry validation, height-aware projection, budgeted deterministic BFS and
-  center/portal routes. No Halo, ECS, timeline, renderer, heap or network types.
+  geometry validation, height-aware projection (also looking down,
+  `sn_project_below`), static components, budgeted deterministic A* and
+  string-pulled routes. No Halo, ECS, timeline, renderer, heap or network types.
 - `source/features/bots/navigation_world.*`: validated CE collision edge-ring adapter,
   actual biped tag dimensions/slope, double-buffer publication, live CE capsule
   checks, temporary region blocking and incremental diagnostic dumps.
@@ -24,6 +25,10 @@ for isolated geometry acceptance tests. Forge nav authoring is not implemented.
 Resources are keyed by map-name identity, checksum, BSP index, agent dimensions,
 format version and Forge object-edit revision. Queries/routes carry the key,
 resource generation and temporary-obstacle generation; mismatches return stale.
+Normal bots pass a fixed obstacle generation: a temporary blockage made by one bot
+does not discard every other bot's route. Each bot instead checks its next six
+route polygons against the blockage list and replans only when one is blocked.
+The probe still uses the global obstacle generation.
 BSP switching invalidates before unloading (also on failed-switch fallback), map
 teardown invalidates before disposal, and game-state restoration invalidates
 before loading. Resources contain copied geometry, never borrowed BSP pointers.
@@ -41,8 +46,12 @@ rings and reciprocal shared edges. Slopes use the spawned biped definition's
 minimum normal K. Boundary projection and sufficiently wide portals account for
 biped radius; stacked floors are projected separately by height. Only continuous
 shared-edge walking is linked: no inferred step, jump, drop, climb or teleport
-links. Radius-inset/centroid routing is intentionally conservative and can reject
-valid passages that require a more sophisticated corridor/funnel representation.
+links. Radius-inset projection is intentionally conservative. Polygons with unusable
+centers are not endpoints, but a single narrow BSP seam can be crossed between
+two usable neighbors when the portal-to-portal segment clears every exterior
+edge by the agent radius. Rat Race's apparent stair disconnections were these
+seams: 24 floor components become 20, with the main floor growing from 122 to
+183 usable polygons. Chains of narrow polygons are not yet bridged.
 
 The quantization tables in legacy `path_structure_bsp.c` are unused there; their
 low-bit clearance interpretation was **not proven** for these multiplayer maps.
@@ -53,12 +62,87 @@ lower sphere center above ground, center-to-center height = standing height minu
 twice radius, with slope-aware ground offset. This corrected a second integration
 error where ground-level sphere centers made all routes appear obstructed.
 
-Queries check center-to-portal/portal-to-center segments against live BSP and object
-collision. Following rechecks the next segment, waits for transient occupants,
-then temporarily blocks a region and performs bounded replanning if stuck. This
-is not crowd avoidance, door interaction or advanced dynamic-obstacle navigation.
-Moving vehicles/bipeds are detected by these live checks, not by a comprehensive
-object-change notification system.
+The build also records static topology: each polygon whose center the agent can
+stand on gets the lowest polygon index of its connected set (union-find over
+reciprocal adjacency, bounded per tick), `sn_component()`. A query whose projected
+endpoints lie in different components returns **disconnected** without searching
+or calling collision; **no-path** therefore always means collision checks refused
+every route within one component. Lane and random patrol goals are chosen only
+among polygons in the bot's own component; a rejected preferred polygon is
+logged with its reason (`center-unusable` or `disconnected`).
+
+**Search.** A* over polygons minimizes the length of the start -> portal ->
+center ... portal -> goal polyline, with the straight line to the goal as the
+heuristic and ties broken by polygon index. (Breadth-first search, which
+minimized polygon count, sent bots on 70-waypoint detours across Blood Gulch's
+uneven terrain triangles.) Inside the start polygon a route leaves from the start
+point straight to the portal, and inside the goal polygon it goes straight to the
+goal point (both convex), so neither polygon's center can refuse the search. A
+caller whose goal is a unit's position may clear `check_goal_segment` to skip the
+segment inside the goal polygon; bots do so for pursuit and pickup goals.
+
+Bot searches check segments against the **structure and scenery only**
+(`navigation_world_search_clear`): never bipeds, vehicles or machines, which
+move. The two canonical halves of every polygon edge (center->portal,
+portal->center) are swept once per resource and the verdict cached (128 KiB);
+segments to or from start and goal points are swept each time. Temporarily
+blocked polygons are refused before the cache, except that a bot may always
+leave the polygon it stands in. In 24-bot Blood Gulch runs this is about
+100 sweeps per 10 s against ~10,000 cached verdicts. The probe keeps the live
+`navigation_world_segment_clear` for both search and following.
+
+**Routes.** The polygon corridor is kept (`corridor[]`, each point's
+`corridor_index[]`), and `sn_route_straighten` replaces the center/portal
+points by the shortest path through the corridor (Mononen's simple stupid
+funnel), turning only at portal ends held the agent radius in. Blood Gulch
+patrol routes average ~10 points instead of ~73.
+
+**Following.** A waypoint is reached within 0.45 m horizontally and 0.35 m
+vertically, or passed: within 2 m and already closer to the next waypoint than
+the waypoint itself is. The live check before each move sweeps **vehicles and
+machines only** (`navigation_world_occupant_clear`): a straight full-pill sweep
+from the bot to its waypoint across uneven ground read hills as obstacles, and
+other bipeds are avoided by the bot's own per-tick capsule steering. A tactical
+route's last segment is not checked (the target stands there). A bot is stuck
+when it moves less than 0.5 m in each of two seconds, or misses a waypoint's
+deadline (2 s plus 1 s per metre); it then blocks the next corridor polygon
+after the one it stands in and replans. Blocks last 2 s; a polygon blocked again
+within 30 s of its last block is blocked twice as long, up to 32 s, so a parked
+vehicle or an unclimbable rise is learned. Each bot checks its next six corridor
+polygons against the blocks; one bot's block never invalidates another's route.
+While a bot searches or follows a route, the bots' stall escape no longer runs
+it in an arbitrary direction on ticks it emits no move; a real stall still does.
+This is not crowd avoidance, door interaction or advanced dynamic-obstacle
+navigation.
+
+**Short ascents.** While following an existing corridor, a grounded, unstunned
+biped may request one short jump per waypoint (rise 0.3–1.6 m, horizontal distance
+at most 2.5 m). `sn_jump_candidate` uses its current horizontal momentum, actual
+jump impulse and per-tick gravity to find a descending landing within 0.25 m,
+with at most 60 ticks. `navigation_world_jump_clear` requires a projected landing
+and sweeps the real capsule along every predicted tick before emitting a normal
+jump intent. Grounded landings, missed landings and requests that never become
+airborne are logged; steering/acceleration can still change the actual trajectory.
+These are local ascent attempts, **not graph links across disconnected floors**.
+Arbitrary gap jumps, drops, chained stair traversal and platform-to-platform
+links remain unimplemented.
+
+Bot endpoints first project below, then may move horizontally up to 1 m toward a
+usable polygon center (`sn_project_near`) when a target is against a wall or on a
+seam. This is a candidate, not a guarantee that the endpoint is reachable through
+an intervening wall; collision checks still decide whether it can be approached.
+
+**Anchors.** `source/features/bots/map_anchors.*` reads the scenario's starting
+locations, netgame flags (CTF flags and vehicles, oddball spawns, race, hills,
+teleporter sources and targets) and netgame equipment (weapon and powerup
+spawns with item collection, respawn time and game types), each element count
+checked, places each on the walkable polygons (`sn_project_below`, 3 m), logs
+them (`anchors: ...`) and writes `debug.map_anchors_dump` (`.json`,
+data-root-relative, published by rename). The lane axis runs between the two
+teams' CTF flags when the map has them (Blood Gulch: 97.6 m; the average team
+starting locations gave 22.6 m), else between the starting-location averages.
+Blood Gulch has 297 anchors, 286 on walkable polygons; all but one (the blue
+base's teleporter source, an isolated polygon) are in one component.
 
 ### Explicit ceilings and costs
 
@@ -67,12 +151,14 @@ object-change notification system.
   return capacity rather than an incomplete route.
 - Build: at most 128 source/adjacency rows per game tick; no background thread.
 - Probe search: at most 2 polygon expansions per tick, each with at most 8 edges.
-- Each normal bot search: at most 4 polygon expansions per tick, each with at most 8 edges; moving goals replan after 12 metres to avoid restarting on ordinary target motion.
+- Each normal bot search: at most 16 polygon expansions per tick, each with at most 8 edges (or 8 × 8 candidate exits through seams). Canonical edge verdicts are mostly cached; seam crossings are swept per query. Moving goals replan after 12 metres.
 - Dump: at most 64 polygons per tick, published by renaming a `.partial` file.
 - Projection/query initialization is a bounded **linear** polygon scan, not tiled
-  or spatially indexed. BFS minimizes polygon hops, not geometric distance.
-- Resource 2,752,576 bytes; two resources plus 524,304-byte builder and the probe's
-  147,552-byte query/16,456-byte route total about 6 MB static reserved storage.
+  or spatially indexed. A* is O((P+E) log P) with an indexed binary heap.
+- Resource 2,818,112 bytes (64 KiB of it static components); two resources plus
+  524,304-byte builder, 128 KiB edge cache and the probe's 295,016-byte
+  query/20,560-byte route total about 6.6 MB static reserved storage. Each bot
+  owns a query and a route too: about 316 KB per bot, 9.8 MB for 31 bots.
   When disabled, geometry buffers are not built/touched. No per-query allocation.
 
 This is suitable for validating the architecture, **not a claim of production
@@ -127,8 +213,12 @@ floors and ramps, stacked floors without cross-floor links, disconnected islands
 bad endpoints, narrow boundary clearance, insufficient height, unknown clearance
 requiring a callback, dynamic blocked/unblocked callbacks, BSP/overlay/agent/
 checksum/obstacle/resource invalidation, malformed vertices/references/counts,
-source/polygon/corridor capacity, invalid budgets, failed staging isolation and
-repeat-build determinism. They do not emulate every CE collision/asset-loader
+source/polygon/corridor capacity, invalid budgets, failed staging isolation,
+repeat-build determinism, static components (budget-independent), endpoint
+segments that bypass centers, clearance diagnostics, A* choosing the shorter of
+two corridors where breadth-first would not, string pulling (an L turning once
+at the radius-inset corner; straight corridors of 4 and 512 polygons becoming
+one segment) and looking down onto the nearest floor below. They do not emulate every CE collision/asset-loader
 failure or validate real campaign BSP transitions.
 
 Native smoke evidence (legal local retail assets; `/tmp/nav-test`):
@@ -149,14 +239,19 @@ errors on every frame or complete tactical correctness.
 
 ## Next increments (in order)
 
-1. Validate normal-bot lane routes, pursuit replanning, moving/static obstacles,
-   long paths, respawning, game-state reload and campaign BSP-switch/fallback
-   lifecycle. Improve centroid corridor quality and projection indexing.
-2. Introduce explicit CE-grounded traversal capability/link policy and validate
-   feasible directed jumps/drops with actual physics; do not assume clamber.
-3. Add Forge seed/jump/tactical authoring, selection/undo/visualization and a
+1. Extend the single-seam crossing and local short-ascent attempts into explicit
+   directed graph step/jump/drop links with CE-grounded capability checks and
+   landing verification; do not assume clamber. The Rat Race floor seams are
+   now crossed, but isolated platforms and chains of narrow polygons remain.
+2. Teleporter links from the anchors: source and target flags pair by team
+   index (Blood Gulch: red base roof -> (82.8, -114.5), blue -> (43.8, -126.2));
+   confirm the engine's pairing before linking.
+3. A semantic layer over the anchors: named zones and routes, per-polygon
+   danger/exposure/cover costs measured from match telemetry (deaths, kills,
+   sightings), role-dependent weights.
+4. Add Forge seed/jump/tactical authoring, selection/undo/visualization and a
    separate versioned checksum-bound overlay. Keep Explore Neighbors explicit
    and Hide markers neighbor-free; validation must reject unusable authored links.
-4. Evaluate spatial/tiled recooking and background scheduling for placed static
+5. Evaluate spatial/tiled recooking and background scheduling for placed static
    geometry. Preserve stable publication/revision contracts and explicit capacity
    failures rather than enlarging the old small region graph.

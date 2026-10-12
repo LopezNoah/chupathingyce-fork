@@ -43,6 +43,14 @@ struct bot_navigation_agent
 	struct sn_point progress_position;
 	uint32_t waypoint;
 	long progress_tick;
+	long search_tick; /* when the current search began, for its log line */
+	long waypoint_deadline; /* the current waypoint must be reached by then */
+	uint32_t deadline_waypoint;
+	long occupant_wait_ticks; /* at this waypoint, waiting for the live check */
+	uint32_t jump_waypoint; /* last waypoint for which a jump was requested */
+	long jump_tick;
+	boolean jump_active;
+	boolean jump_airborne;
 	short stuck_count;
 	boolean searching;
 	boolean following;
@@ -53,6 +61,7 @@ struct bot_navigation_agent
 struct bot_navigation_command
 {
 	boolean has_move;
+	boolean jump;
 	real yaw;
 	real speed;
 };

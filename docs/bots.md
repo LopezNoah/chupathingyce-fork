@@ -3,7 +3,8 @@
 > **Feature flag:** bots are compiled in only by `python3 configure.py --bots`,
 > and are off by default. Without the flag, the sources under
 > `source/features/bots/` are excluded: no bot can join, and the `bots.*`,
-> `debug.nav_*` and `debug.bot_sandbox` settings are not offered. Existing
+> `debug.nav_*`, `debug.bot_sandbox`, `debug.bot_navigation_only` and
+> `debug.map_anchors_dump` settings are not offered. Existing
 > `config.toml` entries are kept and logged as unknown. The startup log reports
 > `features: ... bots on|off`. The reusable `source/engine_ai/` library and its
 > standalone tests are unaffected.
@@ -133,6 +134,13 @@ select the gunner seat and enter through normal interaction. Keep the Warthog
 stopped while it boards. The teleport is intentionally visible and is not a
 same-side/team spawn preference. Leave the variable unset for normal games;
 `debug.bot_sandbox` defaults to false.
+
+`HALO_BOT_NAVIGATION_ONLY=1` (`debug.bot_navigation_only`, default false) is a
+navigation fixture: bots only patrol their team lanes and hold fire, so every
+route can be followed to arrival (`docs/bot-testing.md`).
+`HALO_MAP_ANCHORS_DUMP=map_anchors.json` (`debug.map_anchors_dump`, default
+empty; data-root-relative, must end in `.json`) writes the map's anchors in
+world coordinates once the walkable polygons are built (`docs/navigation.md`).
 
 For a controlled weapon pickup test, instead add
 `HALO_NETWORK_TEST_PICKUP=5 HALO_NETWORK_TEST_PICKUP_WEAPON=sniper` without the

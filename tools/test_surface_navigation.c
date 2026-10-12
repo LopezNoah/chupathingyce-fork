@@ -8,7 +8,7 @@ static struct sn_resource first,second;
 static struct sn_build build;
 static struct sn_query query;
 static struct sn_route route;
-static struct sn_polygon source[4];
+static struct sn_polygon source[8];
 static struct sn_agent agent={0.2f,1.f,0.7f,0.6f};
 static struct sn_key key={123,0,77,0,12,SN_FORMAT_VERSION};
 static int read_polygon(void *context,uint32_t index,struct sn_polygon *out)
@@ -57,7 +57,8 @@ static void test_floor_and_ramp(void)
     source[1].normal.x=-1.f/sqrtf(5.f); source[1].normal.z=2.f/sqrtf(5.f);
     assert(build_resource(&first,2,1)==SN_READY);
     assert(find(start,goal,NULL,NULL)==SN_FOUND);
-    assert(route.count==5);
+    /* start, portal, goal: no detour through either polygon's center */
+    assert(route.count==3);
     assert(fabsf(route.points[route.count-1].z-0.5f)<0.001f);
     assert(build_resource(&second,2,1)==SN_READY);
     assert(first.polygon_count==second.polygon_count);
@@ -73,10 +74,18 @@ static void test_stacked_and_disconnected(void)
     assert(build_resource(&first,2,2)==SN_READY);
     assert(sn_project(&first,(struct sn_point){1,1,3.1f},&polygon,&projected)==SN_FOUND);
     assert(polygon==1 && projected.z==3.f);
-    assert(find((struct sn_point){1,1,0.1f},(struct sn_point){1,1,3.1f},NULL,NULL)==SN_NO_PATH);
+    /* looking down: 2.5 above the upper floor finds it, never the lower one */
+    assert(sn_project(&first,(struct sn_point){1,1,5.5f},&polygon,&projected)==SN_NO_PATH);
+    assert(sn_project_below(&first,(struct sn_point){1,1,5.5f},3.f,&polygon,&projected)==SN_FOUND);
+    assert(polygon==1 && projected.z==3.f);
+    assert(sn_project_below(&first,(struct sn_point){1,1,9.f},3.f,&polygon,&projected)==SN_NO_PATH);
+    assert(sn_project_below(&first,(struct sn_point){9,9,1.f},3.f,&polygon,&projected)==SN_NO_PATH);
+    /* Static topology rejects these before any search or collision callback. */
+    assert(find((struct sn_point){1,1,0.1f},(struct sn_point){1,1,3.1f},NULL,NULL)==SN_DISCONNECTED);
+    assert(sn_component(&first,0)==0 && sn_component(&first,1)==1);
     rectangle(1,4,0,0,2,2);
     assert(build_resource(&first,2,3)==SN_READY);
-    assert(find((struct sn_point){1,1,0.1f},(struct sn_point){5,1,0.1f},NULL,NULL)==SN_NO_PATH);
+    assert(find((struct sn_point){1,1,0.1f},(struct sn_point){5,1,0.1f},NULL,NULL)==SN_DISCONNECTED);
 }
 static void test_clearance(void)
 {
@@ -101,7 +110,16 @@ static void test_obstacles_and_revisions(void)
     rectangle(0,0,0,0,2,2); rectangle(1,2,0,0,2,2);
     source[0].neighbors[1]=1; source[1].neighbors[3]=0;
     assert(build_resource(&first,2,5)==SN_READY);
+    assert(sn_component(&first,0)==sn_component(&first,1));
+    /* Clearance refusal inside one component is NO_PATH, not DISCONNECTED. */
     assert(find(start,goal,clear_segment,&obstacle)==SN_NO_PATH);
+    assert(query.start_rejected && query.goal_rejected && query.rejected_edges==1);
+    /* An occupied goal (a unit's position) skips the segment inside the goal
+       polygon; reaching its portal is still checked. */
+    assert(sn_query_begin(&query,&first,start,goal,1)==SN_RUNNING);
+    query.check_goal_segment=false;
+    while(query.status==SN_RUNNING) sn_query_step(&query,&first,1,1,clear_segment,&obstacle);
+    assert(query.status==SN_FOUND && query.rejected_edges==0);
     obstacle.blocked=false; /* Deleted/moved obstacle: collision adapter no longer blocks it. */
     assert(find(start,goal,clear_segment,&obstacle)==SN_FOUND);
     assert(sn_route_current(&route,&first,1));
@@ -133,6 +151,134 @@ static void test_unknown_clearance(void)
     assert(sn_query_begin(&query,&first,(struct sn_point){1,1,0},(struct sn_point){1.5f,1,0},1)==SN_RUNNING);
     assert(sn_query_step(&query,&first,1,0,clear_segment,&obstacle)==SN_INVALID);
 }
+/* Components follow adjacency, not storage order or build budget; a polygon the
+   agent cannot stand on splits the chain and is never a component member. */
+static void test_components(void)
+{
+    struct blockage obstacle={false};
+    enum sn_status status;
+    uint32_t calls=0;
+    rectangle(0,2,0,0,2,2); rectangle(1,0,0,0,2,2); rectangle(2,20,0,0,2,0.3f); rectangle(3,8,0,0,2,2);
+    source[0].neighbors[3]=1; source[1].neighbors[1]=0;
+    assert(build_resource(&first,4,8)==SN_READY);
+    assert(sn_component(&first,0)==0 && sn_component(&first,1)==0);
+    assert(sn_component(&first,2)==SN_NONE && sn_component(&first,3)==3);
+    assert(sn_component(&first,99)==SN_NONE);
+    status=sn_build_begin(&build,&second,4,key,8,agent);
+    while(status==SN_RUNNING && calls++<100) status=sn_build_step(&build,&second,1,read_polygon,NULL);
+    assert(status==SN_READY && memcmp(first.components,second.components,4*sizeof(first.components[0]))==0);
+    assert(find((struct sn_point){1,1,0},(struct sn_point){9,1,0},clear_segment,&obstacle)==SN_DISCONNECTED);
+    assert(find((struct sn_point){1,1,0},(struct sn_point){3,1,0},clear_segment,&obstacle)==SN_FOUND);
+    assert(query.rejected_edges==0 && !query.start_rejected && !query.goal_rejected);
+}
+/* Refuses any segment touching the start polygon's center (1,1). */
+static bool refuse_center(void *context,struct sn_point a,uint32_t ap,struct sn_point b,uint32_t bp)
+{
+    (void)context;(void)ap;(void)bp;
+    return !(a.x==1.f && a.y==1.f) && !(b.x==1.f && b.y==1.f);
+}
+static void test_endpoints_skip_centers(void)
+{
+    rectangle(0,0,0,0,2,2); rectangle(1,2,0,0,2,2);
+    source[0].neighbors[1]=1; source[1].neighbors[3]=0;
+    assert(build_resource(&first,2,10)==SN_READY);
+    assert(find((struct sn_point){0.5f,1.5f,0},(struct sn_point){3.5f,0.5f,0},refuse_center,NULL)==SN_FOUND);
+    assert(route.count==3 && route.points[1].x==2.f && route.points[1].y==1.f);
+    assert(find((struct sn_point){0.5f,1.5f,0},(struct sn_point){1.5f,0.5f,0},refuse_center,NULL)==SN_FOUND);
+    assert(route.count==2);
+}
+/* Refuses only the portal-to-center half of a transition (portal at x=2). */
+static bool refuse_portal(void *context,struct sn_point a,uint32_t ap,struct sn_point b,uint32_t bp)
+{
+    (void)context;(void)b;(void)ap;(void)bp;
+    return a.x!=2.f;
+}
+static void test_rejected_edges(void)
+{
+    rectangle(0,0,0,0,2,2); rectangle(1,2,0,0,2,2);
+    source[0].neighbors[1]=1; source[1].neighbors[3]=0;
+    assert(build_resource(&first,2,9)==SN_READY);
+    assert(find((struct sn_point){1,1,0},(struct sn_point){3,1,0},refuse_portal,NULL)==SN_NO_PATH);
+    assert(query.rejected_edges==1 && query.start_rejected && query.goal_rejected);
+}
+static bool seam_blocked(void *context,struct sn_point a,uint32_t ap,struct sn_point b,uint32_t bp)
+{
+    (void)context;(void)a;(void)b;
+    return ap!=1 && bp!=1;
+}
+/* A* follows length, not polygon count: the straight row A,C,D,G beats the
+   two-polygon detour A,B,G through a long polygon B above them. */
+static void test_shortest_route(void)
+{
+    struct sn_polygon *b=&source[4];
+    rectangle(0,0,0,0,2,2); rectangle(1,2,0,0,2,2); rectangle(2,4,0,0,2,2); rectangle(3,6,0,0,2,2);
+    rectangle(4,0,2,0,8,38);
+    b->vertices[0]=(struct sn_point){0,2,0}; b->vertices[1]=(struct sn_point){2,2,0};
+    b->vertices[2]=(struct sn_point){6,2,0}; b->vertices[3]=(struct sn_point){8,2,0};
+    b->vertices[4]=(struct sn_point){8,40,0}; b->vertices[5]=(struct sn_point){0,40,0};
+    b->vertex_count=6;
+    source[0].neighbors[1]=1; source[0].neighbors[2]=4;
+    source[1].neighbors[3]=0; source[1].neighbors[1]=2;
+    source[2].neighbors[3]=1; source[2].neighbors[1]=3;
+    source[3].neighbors[3]=2; source[3].neighbors[2]=4;
+    b->neighbors[0]=0; b->neighbors[2]=3;
+    assert(build_resource(&first,5,11)==SN_READY);
+    assert(find((struct sn_point){1,1,0},(struct sn_point){7,1,0},NULL,NULL)==SN_FOUND);
+    assert(route.count==7 && route.points[1].x==2.f && route.points[1].y==1.f);
+    assert(route.polygons[2]==1 && route.polygons[4]==2);
+}
+/* String pulling: a straight corridor is one segment; an L turns once at the
+   inner corner, held the agent radius (0.2) in from the wall's end. */
+static void test_straighten(void)
+{
+    rectangle(0,0,0,0,2,2); rectangle(1,2,0,0,2,2); rectangle(2,2,2,0,2,2);
+    source[0].neighbors[1]=1; source[1].neighbors[3]=0;
+    source[1].neighbors[2]=2; source[2].neighbors[0]=1;
+    assert(build_resource(&first,3,12)==SN_READY);
+    assert(find((struct sn_point){1,1,0},(struct sn_point){3,3,0},NULL,NULL)==SN_FOUND);
+    assert(route.corridor_count==3 && route.corridor[0]==0 && route.corridor[2]==2);
+    sn_route_straighten(&route,&first);
+    assert(route.count==4 && route.corridor_count==3);
+    assert(fabsf(route.points[1].x-2.f)<0.001f && fabsf(route.points[1].y-1.8f)<0.001f);
+    assert(fabsf(route.points[2].x-2.2f)<0.001f && fabsf(route.points[2].y-2.f)<0.001f);
+    assert(route.polygons[1]==1 && route.polygons[2]==2 && route.corridor_index[3]==2);
+    assert(route.points[3].x==3.f && route.points[3].y==3.f);
+    test_shortest_route();
+    sn_route_straighten(&route,&first);
+    assert(route.count==2 && route.points[1].x==7.f);
+}
+/* A 0.13 m seam between two floors is never a node, yet joins them: the route
+   crosses it, the corridor keeps it, and the straightened route is one segment. */
+static void test_seam(void)
+{
+    struct sn_point projected;
+    struct sn_polygon *seam=&source[1];
+    uint32_t polygon;
+    /* floors offset by 0.5 m, so each long side of the seam is partly outside */
+    rectangle(0,0,0,0,2,2); rectangle(1,2,0,0,0.13f,2.5f); rectangle(2,2.13f,0.5f,0,2,2);
+    seam->vertices[0]=(struct sn_point){2,0,0}; seam->vertices[1]=(struct sn_point){2.13f,0,0};
+    seam->vertices[2]=(struct sn_point){2.13f,0.5f,0}; seam->vertices[3]=(struct sn_point){2.13f,2.5f,0};
+    seam->vertices[4]=(struct sn_point){2,2.5f,0}; seam->vertices[5]=(struct sn_point){2,2,0};
+    seam->vertex_count=6;
+    source[0].neighbors[1]=1; seam->neighbors[5]=0;
+    seam->neighbors[2]=2; source[2].neighbors[3]=1;
+    assert(build_resource(&first,3,13)==SN_READY);
+    assert(sn_component(&first,1)==SN_NONE && sn_component(&first,0)==sn_component(&first,2));
+    assert(sn_project(&first,(struct sn_point){2.06f,1,0},&polygon,&projected)==SN_NO_PATH);
+    /* a point on the seam goes to the nearest floor the agent fits on */
+    assert(sn_project_near(&first,(struct sn_point){2.06f,1,0},1.f,1.f,&polygon,&projected)==SN_FOUND);
+    /* This edge is shared, not a wall: the valid floor begins at x=2. */
+    assert(polygon==0 && fabsf(projected.x-2.f)<0.01f && fabsf(projected.y-1.f)<0.05f);
+    assert(sn_project_near(&first,(struct sn_point){2.06f,1,2.f},1.f,1.f,&polygon,&projected)==SN_NO_PATH);
+    assert(sn_project_near(&first,(struct sn_point){9,9,0},1.f,1.f,&polygon,&projected)==SN_NO_PATH);
+    assert(find((struct sn_point){1,1,0},(struct sn_point){3.13f,1.5f,0},clear_segment,&(struct blockage){false})==SN_FOUND);
+    assert(route.corridor_count==3 && route.corridor[1]==1);
+    assert(route.count==4 && route.points[1].x==2.f && fabsf(route.points[2].x-2.13f)<0.0001f);
+    sn_route_straighten(&route,&first);
+    assert(route.count==2);
+    /* the seam's polygon is still checked: blocked, it cannot be crossed */
+    assert(find((struct sn_point){1,1,0},(struct sn_point){3.13f,1.5f,0},seam_blocked,NULL)==SN_NO_PATH);
+}
 static int chain_polygon(void *context,uint32_t index,struct sn_polygon *out)
 {
     uint32_t count=*(uint32_t *)context;
@@ -153,7 +299,9 @@ static void test_route_capacity(void)
         assert(status==SN_READY);
         status=find((struct sn_point){1,1,0},(struct sn_point){2.f*(float)count-1.f,1,0},NULL,NULL);
         if(count==SN_ROUTE_POLYGONS_MAX) {
-            assert(status==SN_FOUND && route.count==SN_WAYPOINTS_MAX);
+            assert(status==SN_FOUND && route.count==SN_WAYPOINTS_MAX-2);
+            sn_route_straighten(&route,&first);
+            assert(route.count==2 && route.corridor_count==SN_ROUTE_POLYGONS_MAX);
         } else {
             assert(status==SN_CAPACITY && route.count==0);
         }
@@ -184,10 +332,25 @@ static void test_malformed_and_capacity(void)
     /* A failed staging build never changes a separate previously published resource. */
     assert(first.ready);
 }
+static void test_jump_candidate(void)
+{
+    struct sn_jump_arc arc;
+    struct sn_point start={0,0,0},goal={1.7f,0,0.85f};
+    assert(sn_jump_candidate(start,goal,0.05f,0.f,0.2f,0.01f,0.1f,&arc));
+    assert(arc.ticks==34 && arc.points[arc.ticks].z<arc.points[arc.ticks-1].z);
+    assert(!sn_jump_candidate(start,goal,0.f,0.f,0.2f,0.01f,0.1f,&arc));
+    assert(arc.ticks==0);
+    assert(!sn_jump_candidate(start,(struct sn_point){1,0,3},0.05f,0.f,0.2f,0.01f,0.1f,&arc));
+    assert(!sn_jump_candidate(start,goal,0.05f,0.f,0.2f,0.f,0.1f,&arc));
+    assert(!sn_jump_candidate(start,goal,NAN,0.f,0.2f,0.01f,0.1f,&arc));
+    assert(!sn_jump_candidate(start,goal,0.05f,0.f,0.2f,0.01f,1.f,&arc));
+}
 int main(void)
 {
     test_floor_and_ramp(); test_stacked_and_disconnected(); test_clearance();
-    test_obstacles_and_revisions(); test_unknown_clearance();
+    test_obstacles_and_revisions(); test_unknown_clearance(); test_components();
+    test_rejected_edges(); test_endpoints_skip_centers(); test_shortest_route();
+    test_straighten(); test_seam(); test_jump_candidate();
     test_route_capacity(); test_malformed_and_capacity();
     printf("surface navigation passed; resource=%zu build=%zu query=%zu route=%zu bytes\n",
         sizeof(first),sizeof(build),sizeof(query),sizeof(route));

@@ -53,6 +53,7 @@ struct bot {
     real_euler_angles2d facing;
     real_point3d target_last_position,target_observed_position;
     boolean moved_last_tick;
+    struct { boolean searching,following; } navigation_agent;
     long movement_check_time,movement_escape_until;
     real movement_escape_yaw;
     real_point3d movement_position;
@@ -243,6 +244,11 @@ static void steering_tests(void) {
     b=fresh(); mode=2; bot_submit_action(&b);
     assert(submitted.throttle.i==0.f && submitted.throttle.j==0.f && sweeps==16);
     assert(!b.moved_last_tick);
+    /* Intentional search/occupant waits must not become arbitrary escape moves. */
+    b=fresh(); mode=0; b.navigation_agent.searching=TRUE; bot_submit_action(&b);
+    assert(submitted.throttle.i==0.f && submitted.throttle.j==0.f && sweeps==0);
+    b=fresh(); b.navigation_agent.following=TRUE; bot_submit_action(&b);
+    assert(submitted.throttle.i==0.f && submitted.throttle.j==0.f && sweeps==0);
     b=fresh(); mode=1; b.pending.has_move=TRUE; b.pending.move_speed=1.f;
     bot_submit_action(&b);
     assert(submitted.throttle.j>0.4f && b.moved_last_tick);

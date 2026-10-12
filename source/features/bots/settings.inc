@@ -26,6 +26,14 @@ written grouped by section. */
 		"Diagnostic walkable BSP polygon dump path (derived local data, not a map edit)." },
 	{ "debug.nav_goal", _config_string, "\"\"", "HALO_NAV_GOAL", _environment_value, _platform_all,
 		"Optional navigation probe goal as x,y,z in CE world units; empty picks a nearby region." },
+	{ "debug.map_anchors_dump", _config_string, "\"\"", "HALO_MAP_ANCHORS_DUMP", _environment_value, _platform_all,
+		"Diagnostic JSON of the map's anchors (starting locations, netgame flags,\n"
+		"weapon and powerup spawns) in world coordinates, each placed on the walkable\n"
+		"BSP polygons; the path must end in .json (docs/navigation.md)." },
+	{ "debug.bot_navigation_only", _config_boolean, "false", "HALO_BOT_NAVIGATION_ONLY", _environment_set_is_true, _platform_all,
+		"Navigation test fixture: bots only patrol their team lanes and hold fire\n"
+		"(no fighting, retreating or pickups), so every route can be checked to\n"
+		"arrival (docs/bot-testing.md); off in normal play." },
 	{ "debug.bot_sandbox", _config_boolean, "false", "HALO_BOT_SANDBOX", _environment_set_is_true, _platform_all,
 		"Solo Team Slayer bot test fixture (requires three bots): seat the local\n"
 		"player in a parked Warthog and place teammate Bot 2 near the gunner entrance\n"

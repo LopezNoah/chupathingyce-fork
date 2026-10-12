@@ -22,6 +22,15 @@ STATUS_RE = re.compile(
     r"bots: bot (\d+) at \((-?[\d.]+) (-?[\d.]+) (-?[\d.]+)\) "
     r"yaw -?[\d.]+ (\w+) \(conf"
 )
+ARRIVED_RE = re.compile(
+    r"bots: bot (\d+) team (\d+) lane (-?\d+) surface (patrol|tactical) arrived goal"
+)
+ROUTE_END_RES = (
+    ("stuck", re.compile(r"bots: bot (\d+) surface route blocked at")),
+    ("blocked-ahead", re.compile(r"bots: bot (\d+) surface route crosses blocked")),
+    ("new-life", re.compile(r"bots: bot (\d+) team -?\d+ cleared item claims \(new life\)")),
+    ("behavior", re.compile(r"bots: bot (\d+) tick \d+ \w+ -> ")),
+)
 LIFE_RE = re.compile(r"bots: bot (\d+) team -?\d+ cleared item claims \(new life\)")
 CRASH_RE = re.compile(r"FAILURE|assertion failed|Assertion failed|AddressSanitizer|runtime error:")
 STATIONARY_DISTANCE = 0.5
@@ -84,7 +93,47 @@ def check_movement_coverage(text: str, minimum_bots: int) -> int:
     return covered
 
 
-def check_log(path: Path, minimum_bots: int) -> None:
+def route_outcomes(text: str) -> dict[str, int]:
+    """What ended each route found: arrival, a stuck replan, a blockage ahead,
+    death, a behavior change, a new route (replan), or the end of the log."""
+    open_routes: set[int] = set()
+    outcomes: dict[str, int] = {}
+
+    def end(kind: str, bot: int) -> None:
+        open_routes.discard(bot)
+        outcomes[kind] = outcomes.get(kind, 0) + 1
+
+    for line in text.splitlines():
+        match = ROUTE_RE.search(line)
+        if match:
+            bot = parse_number(match.group(1), int)
+            if bot in open_routes:
+                end("replanned", bot)
+            open_routes.add(bot)
+            continue
+        match = ARRIVED_RE.search(line)
+        if match and parse_number(match.group(1), int) in open_routes:
+            end("arrived", parse_number(match.group(1), int))
+            continue
+        for kind, pattern in ROUTE_END_RES:
+            match = pattern.search(line)
+            if match and parse_number(match.group(1), int) in open_routes:
+                end(kind, parse_number(match.group(1), int))
+                break
+    outcomes["unfinished"] = len(open_routes)
+    return outcomes
+
+
+def check_lane_arrivals(text: str, teams: set[int]) -> None:
+    arrived = {(parse_number(team, int), parse_number(lane, int))
+               for _, team, lane, kind in ARRIVED_RE.findall(text) if kind == "patrol"}
+    for team in sorted(teams):
+        lanes = sorted(lane for arrived_team, lane in arrived if arrived_team == team)
+        if set(lanes) != {0, 1, 2}:
+            raise SystemExit(f"team {team} completed patrols in lanes {lanes}, expected 0, 1, 2")
+
+
+def check_log(path: Path, minimum_bots: int, require_lane_arrivals: bool = False) -> None:
     text = path.read_text(errors="replace")
     check_movement_coverage(text, minimum_bots)
     assignments = [
@@ -144,6 +193,10 @@ def check_log(path: Path, minimum_bots: int) -> None:
             raise SystemExit(f"team {team} has a patrol route with fewer than two waypoints")
 
     patrol_count = sum(route[4] == "patrol" for route in routes)
+    if require_lane_arrivals:
+        check_lane_arrivals(text, teams)
+    outcomes = route_outcomes(text)
+    print("route outcomes: " + ", ".join(f"{kind} {count}" for kind, count in sorted(outcomes.items())))
     print(
         f"passed: {len(assignments)} lane assignments, {len(lane_goals)} lane goals, "
         f"{patrol_count} patrol routes, teams {sorted(teams)}"
@@ -154,6 +207,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path)
     parser.add_argument("--minimum-bots", type=int, default=24)
+    parser.add_argument("--require-lane-arrivals", action="store_true",
+                        help="each team must complete a patrol in every lane (debug.bot_navigation_only runs)")
     parser.add_argument("--movement-only", action="store_true",
                         help="check sampled movement without requiring BSP lane coverage")
     args = parser.parse_args()
@@ -162,7 +217,7 @@ def main() -> None:
         covered = check_movement_coverage(text, args.minimum_bots)
         print(f"passed: sampled horizontal movement for {covered} bots (vehicle seats exempt)")
     else:
-        check_log(args.log, args.minimum_bots)
+        check_log(args.log, args.minimum_bots, args.require_lane_arrivals)
 
 
 if __name__ == "__main__":

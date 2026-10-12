@@ -89,6 +89,7 @@ Configuration (port/linux/src/port_config.c): bots.count (0..31), bots.skill.
 #include "human_callouts.h" /* port: nearby human incoming-fire cues */
 #include "bot_navigation.h"
 #include "navigation_world.h"
+#include "map_anchors.h"
 
 #ifdef HALO_FEATURE_BOTS
 
@@ -475,6 +476,7 @@ static struct
 	boolean had_bots;
 	boolean sandbox_done;
 	boolean log_decisions;
+	boolean navigation_only;
 	struct bot_utility_tuning const *tuning;
 	short desired_count;
 	struct bot_skill const *skill;
@@ -507,6 +509,7 @@ void bots_initialize_for_new_map(
 	bots_globals.had_bots = FALSE;
 	bots_globals.sandbox_done = FALSE;
 	bots_globals.log_decisions = config_boolean("debug.bot_decisions") != 0;
+	bots_globals.navigation_only = config_boolean("debug.bot_navigation_only") != 0;
 	bots_globals.tuning = &bot_slayer_tuning;
 	bot_manager_reset();
 	bots_globals.epoch++;
@@ -1317,6 +1320,8 @@ static engine_ai_behavior_result bot_leaf_fight(
 		goal.z = bot->target_last_position.z;
 		navigation_result = bot_navigation_agent_move_to(&bot->navigation_agent,
 			bot->unit_index, goal, 1.f, 1.f, &command);
+		if (command.jump)
+			engine_ai_behavior_intent_emit(emitter, _bot_intent_jump, BOT_INTENT_SCHEMA, NULL, 0);
 		if (navigation_result == BOT_NAVIGATION_MOVING && command.has_move)
 			bot_emit_move(emitter, command.yaw, command.speed);
 		else if (navigation_result == BOT_NAVIGATION_UNAVAILABLE || bot->target_visible)
@@ -1921,6 +1926,8 @@ static engine_ai_behavior_result bot_leaf_scavenge(struct bot *bot,
 	navigation_result = bot_navigation_agent_move_to(&bot->navigation_agent,
 		bot->unit_index, nav_goal, bot_horizontal_distance(&origin, &point) < 2.f ? 0.35f : 1.f,
 		0.6f, &command);
+	if (command.jump)
+		engine_ai_behavior_intent_emit(emitter, _bot_intent_jump, BOT_INTENT_SCHEMA, NULL, 0);
 	if (navigation_result == BOT_NAVIGATION_FAILED)
 	{
 		/* (no route there now: leave it alone for a while rather than retry
@@ -2230,6 +2237,8 @@ static engine_ai_behavior_result bot_leaf_roam(
 	}
 	navigation_result = bot_navigation_agent_roam(&bot->navigation_agent, bot->unit_index,
 		&bot->rng, &command);
+	if (command.jump)
+		engine_ai_behavior_intent_emit(emitter, _bot_intent_jump, BOT_INTENT_SCHEMA, NULL, 0);
 	if (navigation_result == BOT_NAVIGATION_UNAVAILABLE)
 	{
 		if (bot->surface_nav_wait_time == NONE)
@@ -2288,7 +2297,7 @@ static engine_ai_behavior_result bot_behavior_tick(
 	an enemy it sees. Its move is the behavior's, in world space, so it walks
 	to its goal while it shoots. (Fight, retreat and vehicle engage already.) */
 	if (result == ENGINE_AI_BEHAVIOR_RUNNING && bot->target_visible && !bot->abs_suppressed &&
-		leaf_id != _bot_leaf_fight && leaf_id != _bot_leaf_retreat && leaf_id != _bot_leaf_vehicle)
+		!bots_globals.navigation_only && leaf_id != _bot_leaf_fight && leaf_id != _bot_leaf_retreat && leaf_id != _bot_leaf_vehicle)
 	{
 		unit_get_camera_position(bot->unit_index, &eye);
 		bot_engage(bot, &eye, emitter);
@@ -2431,6 +2440,10 @@ static void bot_score_behaviors(
 	}
 
 	bot->scores[_bot_leaf_roam - 1] = tuning->roam;
+	/* (test fixture: lane patrols only, holding fire, so every route can be
+	checked to arrival) */
+	if (bots_globals.navigation_only)
+		return;
 
 	if (bot->target_player_index != NONE)
 	{
@@ -2820,8 +2833,12 @@ static void bot_keep_moving(
 		bot->movement_check_time = now;
 		bot->movement_position = origin;
 	}
-	if (now < bot->movement_escape_until || !bot->pending.has_move ||
-		bot->pending.move_speed <= 0.f)
+	/* (a bot planning or following a BSP route that emits no move this tick is
+	waiting on purpose, for its search or for an occupant to pass; running in
+	the escape direction would take it off its route. A real stall still escapes.) */
+	if (now < bot->movement_escape_until || ((!bot->pending.has_move ||
+		bot->pending.move_speed <= 0.f) && !bot->navigation_agent.searching &&
+		!bot->navigation_agent.following))
 	{
 		bot->pending.has_move = TRUE;
 		bot->pending.move_yaw = bot->movement_escape_yaw;
@@ -3559,10 +3576,19 @@ static void bots_controller_update(
 	halo_trace_zone_begin(HALO_TRACE_ZONE_BOT_AI);
 #endif
 	navigation_world_update_for_players();
+	map_anchors_update();
 	bots_update();
 #ifdef HALO_TRACE_ENABLED
 	halo_trace_zone_end(HALO_TRACE_ZONE_BOT_AI);
 #endif
+}
+
+/* the walkable resource and the anchors placed on it go together */
+static void bots_navigation_reset(
+	void)
+{
+	navigation_world_reset();
+	map_anchors_reset();
 }
 
 static struct halo_player_controller const bots_controller =
@@ -3578,8 +3604,8 @@ struct halo_extension const bots_extension =
 	.objects_placed = bots_initialize_for_new_map,
 	/* derived, host-local navigation never outlives its map, a restored
 	game or the tags it was built from */
-	.dispose_from_old_map = navigation_world_reset,
-	.invalidate_derived_state = navigation_world_reset,
+	.dispose_from_old_map = bots_navigation_reset,
+	.invalidate_derived_state = bots_navigation_reset,
 	/* a game bots played in is not reported to the game list, Delta Stats
 	or the event log */
 	.suppress_game_report = bots_game_had_bots,

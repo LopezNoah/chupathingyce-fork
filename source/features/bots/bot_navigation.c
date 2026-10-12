@@ -24,8 +24,10 @@ Halo physics.
 #include "objects/objects.h"
 #include "units/units.h"
 #include "units/biped_definitions.h"
+#include "units/bipeds.h"
 #include "real_math.h"
 #include "navigation_world.h"
+#include "map_anchors.h"
 #include "bot_navigation.h"
 
 /* port/linux/src/platform.h's */
@@ -37,7 +39,10 @@ void platform_log(char const *format, ...);
 
 enum
 {
-	BOT_NAVIGATION_EXPANSIONS_PER_TICK = 4,
+	/* Search sweeps only static geometry, and each edge's verdict is cached for
+	the resource's life, so an expansion is usually a few array reads. */
+	BOT_NAVIGATION_EXPANSIONS_PER_TICK = 16,
+	BOT_NAVIGATION_TICKS_PER_METRE = TICKS_PER_SECOND, /* (bots walk faster than 1 m/s) */
 	BOT_NAVIGATION_PROGRESS_TICKS = TICKS_PER_SECOND,
 	BOT_NAVIGATION_REPLAN_DISTANCE = 12,
 	BOT_NAVIGATION_GOAL_ATTEMPTS = 16,
@@ -48,6 +53,15 @@ enum
 #define BOT_NAVIGATION_NEAR_PROGRESS 0.48f
 #define BOT_NAVIGATION_FAR_PROGRESS 0.82f
 
+/* Bot queries and routes are keyed to the BSP resource only, not to the global
+obstacle revision: one bot's temporary blockage must not discard every other
+bot's route. Each bot checks its own next polygons instead (bot_nav_follow). */
+#define BOT_NAVIGATION_ROUTE_OBSTACLES 0
+#define BOT_NAVIGATION_BLOCK_LOOKAHEAD 6
+/* An airborne bot, or a target in a seat or mid-jump, is above the floor it will
+land on: look down this far, in bands of half the projection height. */
+#define BOT_NAVIGATION_GROUND_DEPTH 3.f
+
 /* ---------- private prototypes */
 
 static real bot_nav_abs(real value);
@@ -56,15 +70,25 @@ static real bot_nav_distance(struct sn_point a, struct sn_point b);
 static struct sn_point bot_nav_position(long unit_index);
 static boolean bot_nav_lane_axis(long team_index, real_point3d *home,
 	real *forward_x, real *forward_y, real *length);
+static uint32_t bot_nav_start_component(struct bot_navigation_agent *agent,
+	struct sn_resource const *resource, struct sn_point start);
+static struct sn_point bot_nav_ground(struct sn_resource const *resource,
+	struct sn_point point);
 static boolean bot_nav_lane_goal(struct bot_navigation_agent *agent,
 	struct sn_resource const *resource, struct sn_point start, struct sn_point *goal);
-static boolean bot_nav_random_goal(struct sn_resource const *resource,
-	struct sn_point start, struct engine_ai_rng32_state *rng, struct sn_point *goal);
+static boolean bot_nav_random_goal(struct bot_navigation_agent *agent,
+	struct sn_resource const *resource, struct sn_point start,
+	struct engine_ai_rng32_state *rng, struct sn_point *goal);
 static enum bot_navigation_result bot_nav_route_step(struct bot_navigation_agent *agent,
 	long unit_index, struct sn_point goal, real speed, real arrival_distance,
 	boolean patrol, struct bot_navigation_command *command);
+static void bot_nav_log_failure(struct bot_navigation_agent *agent,
+	struct sn_resource const *resource, struct sn_point start, enum sn_status status);
 static enum bot_navigation_result bot_nav_search(struct bot_navigation_agent *agent,
 	long unit_index, struct sn_resource const *resource, struct sn_point start);
+static enum bot_navigation_result bot_nav_stuck(struct bot_navigation_agent *agent,
+	struct sn_resource const *resource, struct sn_point origin, boolean patrol,
+	char const *reason);
 static enum bot_navigation_result bot_nav_follow(struct bot_navigation_agent *agent,
 	long unit_index, struct sn_resource const *resource, struct sn_point origin,
 	real speed, boolean patrol, struct bot_navigation_command *command);
@@ -103,6 +127,12 @@ void bot_navigation_agent_reset_path(
 {
 	if (!agent)
 		return;
+	if (agent->searching)
+	{
+		platform_log("bots: bot %d surface %s search abandoned after %ld ticks",
+			agent->bot_number, agent->patrol_goal ? "patrol" : "tactical",
+			game_time_get() - agent->search_tick);
+	}
 	agent->searching = FALSE;
 	agent->following = FALSE;
 	agent->goal_valid = FALSE;
@@ -153,7 +183,7 @@ enum bot_navigation_result bot_navigation_agent_roam(
 		start = bot_nav_position(unit_index);
 		selected = agent->lane_assigned ?
 			bot_nav_lane_goal(agent, resource, start, &goal) :
-			bot_nav_random_goal(resource, start, rng, &goal);
+			bot_nav_random_goal(agent, resource, start, rng, &goal);
 		if (!selected)
 			return BOT_NAVIGATION_FAILED;
 		agent->goal = goal;
@@ -214,7 +244,11 @@ static struct sn_point bot_nav_position(
 	return point;
 }
 
-/* Team start locations give the map-relative direction of advance. */
+/* The direction of advance runs from this team's base to the enemy's: their
+CTF flags, which a map places in its bases whatever the game type. A map with
+no flags falls back to the average team start locations, which on a map like
+Blood Gulch are spread far from the bases (a 22.6 m axis between flags 97.6 m
+apart), so the flags come first. */
 static boolean bot_nav_lane_axis(
 	long team_index,
 	real_point3d *home,
@@ -233,6 +267,17 @@ static boolean bot_nav_lane_axis(
 
 	csmemset(home, 0, sizeof(*home));
 	csmemset(&enemy, 0, sizeof(enemy));
+	if (map_anchors_team_base(team_index, home) && map_anchors_team_base(enemy_team, &enemy))
+	{
+		home_count = 1;
+		enemy_count = 1;
+		count = 0;
+	}
+	else
+	{
+		csmemset(home, 0, sizeof(*home));
+		csmemset(&enemy, 0, sizeof(enemy));
+	}
 	for (index = 0; index < count; index++)
 	{
 		struct player_starting_location const *location = player_get_starting_location(index);
@@ -272,7 +317,41 @@ static boolean bot_nav_lane_axis(
 	return TRUE;
 }
 
-/* Pick a walkable surface near this bot's lane and assigned depth. */
+/* Find the floor below a point, or a usable point within 1 m when the point
+lies at a wall or seam. The route's collision checks still decide whether the
+projected endpoint can be approached. Failed projection leaves it unchanged. */
+static struct sn_point bot_nav_ground(
+	struct sn_resource const *resource,
+	struct sn_point point)
+{
+	struct sn_point projected;
+	uint32_t polygon;
+
+	return sn_project_near(resource, point, BOT_NAVIGATION_GROUND_DEPTH, 1.f, &polygon, &projected) ==
+		SN_FOUND ? projected : point;
+}
+
+/* The static component the bot stands in. Goals outside it cannot be reached
+whatever the collision checks say, so they are never selected. */
+static uint32_t bot_nav_start_component(
+	struct bot_navigation_agent *agent,
+	struct sn_resource const *resource,
+	struct sn_point start)
+{
+	uint32_t polygon;
+	struct sn_point projected;
+
+	if (sn_project(resource, bot_nav_ground(resource, start), &polygon, &projected) != SN_FOUND)
+	{
+		platform_log("bots: bot %d patrol goal not chosen: start (%.1f %.1f %.1f) does not project "
+			"(bad-start)", agent->bot_number, start.x, start.y, start.z);
+		return SN_NONE;
+	}
+	return sn_component(resource, polygon);
+}
+
+/* Pick a walkable surface near this bot's lane and assigned depth, among the
+polygons the bot can reach (same static component, center projectable). */
 static boolean bot_nav_lane_goal(
 	struct bot_navigation_agent *agent,
 	struct sn_resource const *resource,
@@ -290,16 +369,26 @@ static boolean bot_nav_lane_goal(
 	real best_cost = 100000000.f;
 	real actual_progress;
 	real actual_lateral;
+	real unfiltered_cost = 100000000.f;
 	uint32_t best = SN_NONE;
+	uint32_t unfiltered = SN_NONE;
+	uint32_t component;
 	uint32_t index;
 	boolean first = TRUE;
 
 	if (!bot_nav_lane_axis(agent->team_index, &home, &forward_x, &forward_y, &length))
 		return FALSE;
+	component = bot_nav_start_component(agent, resource, start);
+	if (component == SN_NONE)
+		return FALSE;
+	/* Lane widths span the reachable ground, not walls or separate floors. */
 	for (index = 0; index < resource->polygon_count; index++)
 	{
 		struct sn_point center = resource->polygons[index].center;
 		real lateral = -(center.x - home.x) * forward_y + (center.y - home.y) * forward_x;
+
+		if (sn_component(resource, index) != component)
+			continue;
 
 		if (first || lateral < lateral_min)
 			lateral_min = lateral;
@@ -328,35 +417,59 @@ static boolean bot_nav_lane_goal(
 			cost += length * 2.f;
 		if (bot_nav_horizontal_distance(start, center) < BOT_NAVIGATION_MINIMUM_GOAL_DISTANCE)
 			cost += length;
-		if (cost < best_cost)
+		if (cost < unfiltered_cost)
+		{
+			unfiltered_cost = cost;
+			unfiltered = index;
+		}
+		if (sn_component(resource, index) == component && cost < best_cost)
 		{
 			best_cost = cost;
 			best = index;
 		}
 	}
 	if (best == SN_NONE)
+	{
+		platform_log("bots: bot %d lane target team %ld lane %d: no reachable polygon in component %lu",
+			agent->bot_number, agent->team_index, agent->lane_index, (unsigned long)component);
 		return FALSE;
+	}
+	if (unfiltered != best)
+	{
+		/* Record why the geometrically preferred polygon was not used. */
+		platform_log("bots: bot %d lane target team %ld lane %d rejected polygon %lu (%.1f %.1f %.1f): %s",
+			agent->bot_number, agent->team_index, agent->lane_index, (unsigned long)unfiltered,
+			resource->polygons[unfiltered].center.x, resource->polygons[unfiltered].center.y,
+			resource->polygons[unfiltered].center.z,
+			sn_component(resource, unfiltered) == SN_NONE ? "center-unusable" : "disconnected");
+	}
 	*goal = resource->polygons[best].center;
 	actual_progress = (goal->x - home.x) * forward_x + (goal->y - home.y) * forward_y;
 	actual_lateral = -(goal->x - home.x) * forward_y + (goal->y - home.y) * forward_x;
 	platform_log("bots: bot %d lane target team %ld lane %d phase %d home (%.1f %.1f) "
 		"axis (%.2f %.2f) length %.1f cross %.1f..%.1f want %.1f/%.1f "
-		"got %.1f/%.1f goal (%.1f %.1f %.1f) polygon %lu", agent->bot_number, agent->team_index,
-		agent->lane_index, agent->lane_phase, home.x, home.y, forward_x, forward_y,
+		"got %.1f/%.1f goal (%.1f %.1f %.1f) polygon %lu component %lu", agent->bot_number,
+		agent->team_index, agent->lane_index, agent->lane_phase, home.x, home.y, forward_x, forward_y,
 		length, lateral_min, lateral_max, desired_progress, desired_lateral,
-		actual_progress, actual_lateral, goal->x, goal->y, goal->z, (unsigned long)best);
+		actual_progress, actual_lateral, goal->x, goal->y, goal->z, (unsigned long)best,
+		(unsigned long)component);
 	return TRUE;
 }
 
 static boolean bot_nav_random_goal(
+	struct bot_navigation_agent *agent,
 	struct sn_resource const *resource,
 	struct sn_point start,
 	struct engine_ai_rng32_state *rng,
 	struct sn_point *goal)
 {
 	uint32_t attempt;
+	uint32_t component;
 
 	if (resource->polygon_count == 0)
+		return FALSE;
+	component = bot_nav_start_component(agent, resource, start);
+	if (component == SN_NONE)
 		return FALSE;
 	for (attempt = 0; attempt < BOT_NAVIGATION_GOAL_ATTEMPTS; attempt++)
 	{
@@ -364,7 +477,8 @@ static boolean bot_nav_random_goal(
 
 		if (engine_ai_rng32_bounded(rng, resource->polygon_count, &candidate) != ENGINE_AI_RNG32_OK)
 			return FALSE;
-		if (bot_nav_horizontal_distance(start, resource->polygons[candidate].center) >=
+		if (sn_component(resource, candidate) == component &&
+			bot_nav_horizontal_distance(start, resource->polygons[candidate].center) >=
 			BOT_NAVIGATION_MINIMUM_GOAL_DISTANCE)
 		{
 			*goal = resource->polygons[candidate].center;
@@ -423,6 +537,37 @@ static enum bot_navigation_result bot_nav_route_step(
 	return bot_nav_follow(agent, unit_index, resource, origin, speed, patrol, command);
 }
 
+/* One line per failed search. The kind separates an endpoint that does not
+project (bad-start, bad-goal), endpoints in different static components
+(disconnected), and a search refused by collision checks within one component
+(clearance: at the start or goal segment, or rejected-edges between polygons;
+static geometry and transient occupants are not distinguished). Polygon pairs
+let a log reader count distinct failures apart from retries of the same goal. */
+static void bot_nav_log_failure(
+	struct bot_navigation_agent *agent,
+	struct sn_resource const *resource,
+	struct sn_point start,
+	enum sn_status status)
+{
+	struct sn_query const *query = &agent->search;
+	char const *kind = sn_status_name(status);
+
+	if (status == SN_NO_PATH)
+		kind = query->start_rejected && query->goal_rejected ? "clearance-start-goal" :
+			query->start_rejected ? "clearance-start" :
+			query->goal_rejected ? "clearance-goal" : "clearance-edges";
+	platform_log("bots: bot %d surface %s search failed: %s kind %s start (%.1f %.1f %.1f) "
+		"polygon %ld component %ld goal (%.1f %.1f %.1f) polygon %ld component %ld "
+		"rejected-edges %lu", agent->bot_number, agent->patrol_goal ? "patrol" : "tactical",
+		sn_status_name(status), kind, start.x, start.y, start.z,
+		query->start == SN_NONE ? -1L : (long)query->start,
+		query->start == SN_NONE ? -1L : (long)sn_component(resource, query->start),
+		agent->goal.x, agent->goal.y, agent->goal.z,
+		query->goal == SN_NONE ? -1L : (long)query->goal,
+		query->goal == SN_NONE ? -1L : (long)sn_component(resource, query->goal),
+		(unsigned long)query->rejected_edges);
+}
+
 static enum bot_navigation_result bot_nav_search(
 	struct bot_navigation_agent *agent,
 	long unit_index,
@@ -433,44 +578,57 @@ static enum bot_navigation_result bot_nav_search(
 
 	if (!agent->searching)
 	{
-		status = sn_query_begin(&agent->search, resource, start, agent->goal,
-			navigation_world_obstacle_revision());
+		status = sn_query_begin(&agent->search, resource, bot_nav_ground(resource, start),
+			bot_nav_ground(resource, agent->goal), BOT_NAVIGATION_ROUTE_OBSTACLES);
 		if (status != SN_RUNNING)
 		{
-			platform_log("bots: bot %d surface %s search failed: %s", agent->bot_number,
-				agent->patrol_goal ? "patrol" : "tactical", sn_status_name(status));
+			bot_nav_log_failure(agent, resource, start, status);
 			bot_navigation_agent_reset_path(agent);
 			return BOT_NAVIGATION_FAILED;
 		}
+		/* A tactical goal is a unit's or item's position: an enemy standing there
+		would refuse the last segment, though the route to it is open. */
+		agent->search.check_goal_segment = agent->patrol_goal;
 		agent->searching = TRUE;
+		agent->search_tick = game_time_get();
 	}
-	status = sn_query_step(&agent->search, resource, navigation_world_obstacle_revision(),
-		BOT_NAVIGATION_EXPANSIONS_PER_TICK, navigation_world_segment_clear, &unit_index);
+	status = sn_query_step(&agent->search, resource, BOT_NAVIGATION_ROUTE_OBSTACLES,
+		BOT_NAVIGATION_EXPANSIONS_PER_TICK, navigation_world_search_clear, &unit_index);
 	if (status == SN_RUNNING)
 		return BOT_NAVIGATION_WAITING;
 	if (status == SN_FOUND)
 		status = sn_query_result(&agent->search, resource,
-			navigation_world_obstacle_revision(), &agent->route);
+			BOT_NAVIGATION_ROUTE_OBSTACLES, &agent->route);
+	/* (walk straight across each run of polygons, turning only at corners) */
+	if (status == SN_FOUND)
+		sn_route_straighten(&agent->route, resource);
 	if (status != SN_FOUND)
 	{
-		platform_log("bots: bot %d surface %s search failed: %s", agent->bot_number,
-			agent->patrol_goal ? "patrol" : "tactical", sn_status_name(status));
+		bot_nav_log_failure(agent, resource, start, status);
+		agent->searching = FALSE; /* (failed, not abandoned) */
 		bot_navigation_agent_reset_path(agent);
 		return BOT_NAVIGATION_FAILED;
 	}
 
 	agent->searching = FALSE;
 	agent->following = TRUE;
-	agent->waypoint = 0;
+	/* (waypoint 0 is where the bot stood when the search began) */
+	agent->waypoint = agent->route.count > 1 ? 1 : 0;
+	agent->search_tick = game_time_get() - agent->search_tick;
 	agent->progress_tick = game_time_get();
 	agent->progress_position = start;
 	agent->stuck_count = 0;
+	agent->waypoint_deadline = NONE;
+	agent->jump_waypoint = SN_NONE;
+	agent->jump_active = FALSE;
+	agent->jump_airborne = FALSE;
 	platform_log("bots: bot %d team %ld lane %d squad %ld surface %s route goal "
-		"(%.1f %.1f %.1f) waypoints %lu", agent->bot_number, agent->team_index,
+		"(%.1f %.1f %.1f) waypoints %lu search %ld ticks", agent->bot_number, agent->team_index,
 		agent->lane_index, agent->squad_index, agent->patrol_goal ? "patrol" : "tactical",
 		agent->route.points[agent->route.count - 1].x,
 		agent->route.points[agent->route.count - 1].y,
-		agent->route.points[agent->route.count - 1].z, (unsigned long)agent->route.count);
+		agent->route.points[agent->route.count - 1].z, (unsigned long)agent->route.count,
+		agent->search_tick);
 	return BOT_NAVIGATION_MOVING;
 }
 
@@ -485,29 +643,82 @@ static enum bot_navigation_result bot_nav_follow(
 {
 	struct sn_point target;
 	uint32_t polygon;
+	uint32_t index;
 	real distance;
 	long now = game_time_get();
 	long ignored_unit = unit_index;
 
 	if (!agent->following || !sn_route_current(&agent->route, resource,
-		navigation_world_obstacle_revision()))
+		BOT_NAVIGATION_ROUTE_OBSTACLES))
 	{
 		bot_navigation_agent_reset_path(agent);
 		return BOT_NAVIGATION_FAILED;
 	}
+	if (agent->jump_active)
+	{
+		boolean airborne = TEST_FLAG(biped_get(unit_index)->biped.flags, _biped_airborne_bit);
+		if (airborne)
+			agent->jump_airborne = TRUE;
+		else if (agent->jump_airborne || now - agent->jump_tick > 3)
+		{
+			struct sn_point landing = agent->route.points[agent->jump_waypoint];
+			platform_log("bots: bot %d short jump %s waypoint %lu horizontal %.2f vertical %.2f",
+				agent->bot_number, agent->jump_airborne ? "landed" : "not-started",
+				(unsigned long)agent->jump_waypoint, bot_nav_horizontal_distance(origin, landing),
+				bot_nav_abs(origin.z - landing.z));
+			agent->jump_active = FALSE;
+		}
+	}
+	/* A waypoint is reached within 0.45 m, or passed: the bot is near it and
+	already closer to the following waypoint than the waypoint itself is.
+	Without the second test a bot that slides by at 0.5 m turns back for it. */
 	while (agent->waypoint < agent->route.count)
 	{
 		struct sn_point next = agent->route.points[agent->waypoint];
-		if (bot_nav_horizontal_distance(origin, next) >= 0.45f || bot_nav_abs(origin.z - next.z) >= 0.35f)
-			break;
+		real away = bot_nav_horizontal_distance(origin, next);
+
+		if (away >= 0.45f || bot_nav_abs(origin.z - next.z) >= 0.35f)
+		{
+			struct sn_point after;
+
+			if (agent->waypoint + 1 >= agent->route.count || away >= 2.f)
+				break;
+			after = agent->route.points[agent->waypoint + 1];
+			if (bot_nav_horizontal_distance(origin, after) >= bot_nav_horizontal_distance(next, after))
+				break;
+		}
 		agent->waypoint++;
 	}
 	if (agent->waypoint >= agent->route.count)
 	{
+		struct sn_point end = agent->route.points[agent->route.count - 1];
+
+		platform_log("bots: bot %d team %ld lane %d surface %s arrived goal (%.1f %.1f %.1f) "
+			"at (%.1f %.1f %.1f) error %.2f waypoints %lu", agent->bot_number, agent->team_index,
+			agent->lane_index, patrol ? "patrol" : "tactical", end.x, end.y, end.z,
+			origin.x, origin.y, origin.z, bot_nav_horizontal_distance(origin, end),
+			(unsigned long)agent->route.count);
 		bot_navigation_agent_reset_path(agent);
 		if (patrol && agent->lane_assigned)
 			agent->lane_phase = (short)(1 - agent->lane_phase);
 		return BOT_NAVIGATION_ARRIVED;
+	}
+
+	/* Replan only when a blockage lies on this bot's own next few corridor
+	polygons. The bot is somewhere between the previous waypoint's polygon and
+	this one's; the first of those is skipped, being usually the one underfoot. */
+	index = agent->waypoint > 0 ? agent->route.corridor_index[agent->waypoint - 1] + 1U : 1U;
+	for (; index < agent->route.corridor_count &&
+		index <= (uint32_t)agent->route.corridor_index[agent->waypoint] + BOT_NAVIGATION_BLOCK_LOOKAHEAD;
+		index++)
+	{
+		if (navigation_world_polygon_blocked(agent->route.corridor[index]))
+		{
+			platform_log("bots: bot %d surface route crosses blocked polygon %lu; replanning",
+				agent->bot_number, (unsigned long)agent->route.corridor[index]);
+			bot_navigation_agent_reset_path(agent);
+			return BOT_NAVIGATION_FAILED;
+		}
 	}
 
 	if (agent->progress_tick == NONE)
@@ -524,29 +735,96 @@ static enum bot_navigation_result bot_nav_follow(
 		agent->progress_tick = now;
 		agent->progress_position = origin;
 		if (agent->stuck_count >= 2)
-		{
-			polygon = agent->route.polygons[agent->waypoint];
-			navigation_world_block(polygon);
-			platform_log("bots: bot %d surface route blocked at polygon %lu; replanning",
-				agent->bot_number, (unsigned long)polygon);
-			bot_navigation_agent_reset_path(agent);
-			if (patrol && agent->lane_assigned)
-				agent->lane_phase = (short)(1 - agent->lane_phase);
-			return BOT_NAVIGATION_FAILED;
-		}
+			return bot_nav_stuck(agent, resource, origin, patrol, "no movement");
 	}
 
+	/* Displacement alone misses a bot that circles or slides beside a waypoint
+	it cannot reach: each waypoint gets two seconds plus walking time. */
 	target = agent->route.points[agent->waypoint];
+	if (agent->waypoint_deadline == NONE || agent->deadline_waypoint != agent->waypoint)
+	{
+		agent->deadline_waypoint = agent->waypoint;
+		agent->occupant_wait_ticks = 0;
+		agent->waypoint_deadline = now + 2 * TICKS_PER_SECOND +
+			(long)(bot_nav_distance(origin, target) * BOT_NAVIGATION_TICKS_PER_METRE);
+	}
+	else if (now > agent->waypoint_deadline)
+	{
+		platform_log("bots: bot %d waypoint %lu/%lu not reached: at (%.1f %.1f %.1f) "
+			"waypoint (%.1f %.1f %.1f) horizontal %.2f vertical %.2f occupant-wait %ld ticks", agent->bot_number,
+			(unsigned long)agent->waypoint, (unsigned long)agent->route.count,
+			origin.x, origin.y, origin.z, target.x, target.y, target.z,
+			bot_nav_horizontal_distance(origin, target), bot_nav_abs(origin.z - target.z),
+			agent->occupant_wait_ticks);
+		return bot_nav_stuck(agent, resource, origin, patrol, "waypoint deadline");
+	}
+
 	polygon = agent->route.polygons[agent->waypoint];
-	/* Never emit movement toward a waypoint unless the live biped capsule can
-	 * sweep there. A dynamic occupant blocks briefly; a persistent block replans. */
-	if (!navigation_world_segment_clear(&ignored_unit, origin, polygon, target, polygon))
+	/* Never emit movement toward a waypoint through a vehicle or machine. A
+	 * moving one blocks briefly; a persistent block replans.
+	 * A tactical route's last waypoint is the target itself, within the goal's
+	 * own polygon: the target's body is expected there, and physics still stops us. */
+	if ((patrol || agent->waypoint + 1 < agent->route.count) &&
+		!navigation_world_occupant_clear(&ignored_unit, origin, polygon, target, polygon))
+	{
+		agent->occupant_wait_ticks++;
 		return BOT_NAVIGATION_WAITING;
+	}
 	distance = bot_nav_horizontal_distance(origin, target);
+	if (agent->jump_waypoint != agent->waypoint &&
+		navigation_world_jump_clear(unit_index, origin, target))
+	{
+		agent->jump_waypoint = agent->waypoint;
+		agent->jump_active = TRUE;
+		agent->jump_airborne = FALSE;
+		agent->jump_tick = now;
+		command->jump = TRUE;
+		platform_log("bots: bot %d validated short jump to waypoint %lu at (%.2f %.2f %.2f)",
+			agent->bot_number, (unsigned long)agent->waypoint, target.x, target.y, target.z);
+	}
 	command->has_move = TRUE;
 	command->yaw = arctangent(target.y - origin.y, target.x - origin.x);
 	command->speed = MIN(speed, distance * 2.f);
 	return BOT_NAVIGATION_MOVING;
+}
+
+/* Block the next polygon ahead, never the one underfoot: blocking that would
+refuse this bot's own start segment on every replan. */
+static enum bot_navigation_result bot_nav_stuck(
+	struct bot_navigation_agent *agent,
+	struct sn_resource const *resource,
+	struct sn_point origin,
+	boolean patrol,
+	char const *reason)
+{
+	struct sn_point projected;
+	uint32_t current_polygon;
+	uint32_t polygon = SN_NONE;
+	uint32_t index;
+
+	if (sn_project(resource, bot_nav_ground(resource, origin), &current_polygon, &projected) != SN_FOUND)
+		current_polygon = SN_NONE;
+	/* (the corridor polygon after the one underfoot; off the corridor, the
+	polygon the bot was walking into) */
+	for (index = 0; index < agent->route.corridor_count; index++)
+	{
+		if (agent->route.corridor[index] == current_polygon)
+			break;
+	}
+	if (index + 1 < agent->route.corridor_count)
+		polygon = agent->route.corridor[index + 1];
+	else if (index == agent->route.corridor_count && agent->waypoint < agent->route.count &&
+		agent->route.polygons[agent->waypoint] != current_polygon)
+		polygon = agent->route.polygons[agent->waypoint];
+	if (polygon != SN_NONE)
+		navigation_world_block(polygon);
+	platform_log("bots: bot %d surface route blocked at polygon %ld (standing on %ld, %s); "
+		"replanning", agent->bot_number, polygon == SN_NONE ? -1L : (long)polygon,
+		current_polygon == SN_NONE ? -1L : (long)current_polygon, reason);
+	bot_navigation_agent_reset_path(agent);
+	if (patrol && agent->lane_assigned)
+		agent->lane_phase = (short)(1 - agent->lane_phase);
+	return BOT_NAVIGATION_FAILED;
 }
 
 #endif /* HALO_FEATURE_BOTS */

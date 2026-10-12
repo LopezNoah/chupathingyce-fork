@@ -315,6 +315,148 @@ changing routing; also establish actual patrol-arrival logging and recheck the
 pass. Checker regressions now cover jumping-in-place, respawn windows and crashes;
 runner tests cover isolation, natural failure and owned-process watchdog cleanup.
 
+## Navigation correctness pass (2026-10-12)
+
+The failure lines now say why a search failed: `search failed: <status> kind
+<kind> start (...) polygon P component C goal (...) polygon P component C
+rejected-edges N`. Kinds: `bad-start`/`bad-goal` (endpoint does not project),
+`disconnected` (endpoints in different static components; no search is run),
+`clearance-start` (every exit from the start polygon refused), `clearance-goal`
+(the way into the goal polygon refused), `clearance-edges` (refused between
+other polygons). Collision refusal does not yet distinguish static geometry from
+a transient occupant. Completed routes log `surface patrol|tactical arrived goal
+(...) at (...) error E waypoints N`.
+
+First diagnostic run (components and kinds only, before routing changes): on Blood
+Gulch, 10,724 of 10,725 `no-path` were **tactical endpoint** refusals. 6,757 were
+the goal segment (the pursuit goal is the enemy's own position: the sweep from
+the goal polygon's center hit the enemy). Patrol goals contributed almost
+nothing. These were 1,509 distinct bot/start/goal triples over 254 goal polygons,
+not retries of a few goals. Changes then made (`docs/navigation.md`): the start
+and goal polygons are traversed from/to the actual endpoints instead of their
+centers, pursuit/pickup goals skip the segment occupied by the target, endpoint
+clearance is checked once instead of on every search step, bots no longer
+invalidate each other's routes through the global obstacle revision, a stuck
+bot blocks the next polygon rather than its own, and lane/random goals are
+restricted to the bot's component.
+
+Same fixtures (`run_bot_validation.py`, 75 s, base `c95b2898` plus this change):
+
+| Run | no-path | bad-goal | bad-start | disconnected | total | baseline total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Rat Race, 7 bots (`ratrace-7bots-20261012T011306-642968Z`) | 25 | 400 | 41 | 15 | 481 | 4,004 |
+| Blood Gulch, 24 bots (`bloodgulch-24bots-20261012T011146-494008Z`) | 0 | 250 | 17 | 0 | 267 | 13,189 |
+
+Movement-only checks pass on both (7 and 24 bots); no assertion/sanitizer
+signature. Blood Gulch found 98 tactical routes (22 in the baseline). The full
+lane check still fails (team 1: no patrol routes): in these runs bots spend the
+match in fight/scavenge/retreat (roam scores a constant 0.15), so few patrols
+start, and a long patrol search (4 expansions per tick over 2,807 polygons) is
+often abandoned by a behaviour change before it completes. That is behaviour
+selection and search budget, not route validity. Remaining `bad-goal`s are pursuit
+targets with no walkable polygon within standing height below them (seen near the
+Blood Gulch bases at z≈1; plausibly vehicles or non-walkable surfaces), still to
+be confirmed.
+
+## Route completion (2026-10-12, continued)
+
+The combat runs above cannot show whether routes complete: bots spend the match
+fighting, and roam scores a constant 0.15. `--navigation-only` sets
+`debug.bot_navigation_only`: bots only patrol their lanes and hold fire. Every
+run also writes the map's anchors to `data/map_anchors.json`.
+
+```sh
+python3 tools/run_bot_validation.py --map bloodgulch --bots 24 --seconds 120 --navigation-only
+python3 tools/check_bot_navigation_log.py /printed/run/game.log --require-lane-arrivals
+```
+
+The checker prints what ended each route (arrived, stuck, blocked-ahead,
+new-life, behavior, replanned, unfinished) and, with `--require-lane-arrivals`,
+requires each team to complete a patrol in every lane. Route and failure lines
+now carry the search time (`search N ticks`), and a missed waypoint deadline
+logs `waypoint i/n not reached ... occupant-wait N ticks`.
+
+Blood Gulch, 24 bots, navigation-only, 120 s, one change at a time (run
+directories `build/macos/botrun/validation/bloodgulch-24bots-20261012<Run>-*`):
+
+| Change | Routes | Arrived | Stuck | Run |
+| --- | ---: | ---: | ---: | --- |
+| A* and cached static search (bots holding fire) | 83 | 46 | 9 | `T012834` |
+| + waypoint deadline (exposed the drift below) | 274 | 67 | 128 | `T013827` |
+| + no escape drift while searching/waiting; start at waypoint 1; passed waypoints | 247 | 56 | 122 | `T014134` |
+| + live check for vehicles and machines only | 219 | 126 | 46 | `T014608` |
+| + escalating blocks; leaving a blocked start polygon | 232 | 129 | 55 | `T014906` |
+| + lane axis between CTF flags (97.6 m instead of 22.6 m: longer routes) | 168 | 74 | 56 | `T015417` |
+| + string pulling (about 10 points per route instead of about 73) | 170 | 98 | 29 | `T015855` |
+
+The last run passes `--require-lane-arrivals` (both teams, all three lanes),
+with no failed search; the other routes ended 20 blocked-ahead replans, 29
+stuck replans and 23 unfinished at the end (one per bot). Arrival error is at
+most 0.45 m. Search sweeps fell to about 100 per 10 s against about 10,000
+cached verdicts; a search takes 19 ticks on average. A slope-weighted search
+cost was tried (`T020316`: 160 routes, 96 arrived, 30 stuck) and reverted: no
+measurable difference.
+
+Rat Race, 7 bots, navigation-only (`ratrace-7bots-20261012T020113-219634Z`): 75
+routes, 64 arrived, 4 stuck, no failed search.
+
+Normal combat, same binary: Blood Gulch 24 bots (`T020539`) found 393 routes
+with 19 failed searches (8 bad-goal, 10 bad-start, 1 clearance); Rat Race 7 bots
+(`T020714`) found 179 with 98 failed (68 bad-goal, 12 bad-start, 18
+disconnected). Movement checks pass on both. The Rat Race failures cluster at a
+few goals: one spot near (23, -8.5, -1.0) that never projects, and two upper
+areas in components separate from the main floor. Stairs are the likely cause,
+unconfirmed: a tread narrower than the agent is never a route node, and no step
+links exist. Blood Gulch's remaining stuck points are mostly waypoints 1-1.6 m
+above the bot on short steep rises. Both need step/jump links.
+
+The found cause of the drift: `bot_keep_moving` ran a bot at full speed in its
+escape direction on every tick a leaf emitted no move, including every tick of a
+route search and every wait for an occupant, so bots left their routes while
+planning.
+
+## Seam crossings and short ascents (2026-10-12)
+
+Offline analysis of `walkable.nav` disproved the earlier Rat Race stair
+hypothesis for the main floor: narrow BSP seam polygons connected the floor
+regions but were rejected because their centers lacked boundary clearance.
+Single-seam pass-through now joins two usable neighbors when the segment
+between their portals stays a full radius from exterior edges. The corridor
+retains that seam and query-time collision checks still test the crossing.
+Endpoint projection also tries a nearby usable point within 1 m for goals at
+walls/seams; it does not assert reachability through walls.
+
+Short ascents are local, guarded jump attempts along an existing corridor, not
+new graph connections across isolated floors. The biped must be grounded and
+unstunned, the rise 0.3–1.6 m within 2.5 m horizontally, and a descending landing
+must be supported. Its actual jump impulse/current momentum and CE's per-tick
+gravity generate at most 60 candidate samples; each is capsule-swept before a
+normal jump intent. A request is not proof of completion: grounded outcomes
+log horizontal/vertical landing error. Generic gap/step/drop graph links and
+multi-seam chains remain future work.
+
+New runs (same local fixtures; all movement checks pass):
+
+| Run | Routes | Arrived | Stuck replans | Search failures |
+| --- | ---: | ---: | ---: | ---: |
+| Rat Race, 7, patrol-only, 90 s (`T022827`) | 68 | 57 | 4 | 0 |
+| Blood Gulch, 24, patrol-only, 120 s (`T023003`) | 164 | 99 | 31 | 0 |
+| Rat Race, 7, combat, 75 s (`T023208`) | 151 | 2 | 5 | 0 |
+| Blood Gulch, 24, patrol-only, 90 s, landing logs (`T023520`) | 127 | 74 | 18 | 1 |
+
+The Blood Gulch runs pass `--require-lane-arrivals` for both teams/all lanes.
+In the landing-log run, 116 jumps were requested, 98 grounded landings observed,
+and 82 of those were within 0.45 m horizontally/0.35 m vertically of the target;
+5 requests never became airborne. Remaining requests were interrupted or still
+in flight. These runs do not prove all possible step/jump links safe and do not
+show a clear aggregate arrival-rate improvement attributable to jumps alone.
+
+ASan/UBSan surface-navigation and perception/steering tests pass; the latter now
+explicitly checks that route-search and occupant waits do not emit escape moves.
+The 28 movement/awareness/runner unit tests pass. `ninja macos` passes; this
+configured tree still has no `android` target. Runs still need the owned-process
+watchdog; timed shutdown remains unresolved. All map-derived dumps stay local.
+
 ## Still unresolved
 
 - Camouflage and final-steering regression tests pass under ASan/UBSan, and

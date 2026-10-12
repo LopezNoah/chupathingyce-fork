@@ -39,7 +39,13 @@ def run(args):
         "BOT_MAP": args.map, "BOT_COUNT": str(args.bots), "BOT_SECONDS": str(args.seconds),
         "BOT_HIDDEN_WINDOW": "1", "HALO_BOT_HUMAN_CALLOUTS": "false",
         "HALO_TRACE_FILE": str(output / "trace.json"),
+        # data-root relative: the map's anchors land in data/map_anchors.json
+        "HALO_MAP_ANCHORS_DUMP": "map_anchors.json",
+        # and the walkable polygons, for offline route and link analysis
+        "HALO_NAV_DUMP": "walkable.nav",
     })
+    if getattr(args, "navigation_only", False):
+        environment["HALO_BOT_NAVIGATION_ONLY"] = "1"
     metadata = {
         "map": args.map, "bots": args.bots, "wall_seconds": args.seconds,
         "binary": str(binary), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
@@ -47,6 +53,7 @@ def run(args):
         "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
         "hidden_window": True, "null_renderer": True, "human_callouts": False,
         "skill": "spartan", "game": "team_slayer", "loadout": "rifle_pistol",
+        "navigation_only": getattr(args, "navigation_only", False),
         "started_utc": stamp, "stopped_by_watchdog": False,
     }
     started = time.monotonic()
@@ -84,6 +91,8 @@ def main():
     parser.add_argument("--map", choices=("ratrace", "bloodgulch"), required=True)
     parser.add_argument("--bots", type=int, required=True)
     parser.add_argument("--seconds", type=int, default=90, help="maximum wall-clock run duration, including startup")
+    parser.add_argument("--navigation-only", action="store_true",
+                        help="bots only patrol lanes (debug.bot_navigation_only), for route-arrival checks")
     parser.add_argument("--binary", type=Path, default=ROOT / "build/macos/halo")
     parser.add_argument("--source-data", type=Path, default=ROOT / "build/macos/botrun/data")
     parser.add_argument("--output-root", type=Path, default=ROOT / "build/macos/botrun/validation")
