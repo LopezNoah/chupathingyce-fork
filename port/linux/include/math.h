@@ -27,6 +27,15 @@ strnlen() cannot collide with the game's own), which hides glibc's M_*.
 #define M_SQRT1_2 0.707106781186547524401
 #endif
 
+/* C99's classification, which strict gnu89 hides in glibc's header (the
+port's own game units call it: source/engine_ai/surface_navigation.c) */
+#ifndef isfinite
+#define isfinite(x) __builtin_isfinite(x)
+#endif
+#ifndef isnan
+#define isnan(x) __builtin_isnan(x)
+#endif
+
 double _hypot(double x, double y);
 double _copysign(double x, double y);
 
