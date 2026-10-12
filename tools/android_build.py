@@ -496,7 +496,11 @@ def generate_android_build(n: Writer, sln: Any) -> None:
     guest_host_only = {"memory_watch.c"}  # replaced by guest_memory_watch.c
     # (the overlay's fonts are plain C, drawn in the guest with the overlay:
     # stb_truetype; the fonts, tools/embed_assets.py --fonts)
-    guest_posix = {"posix_ui_font.c": f"-I{STB_DIR}"}
+    # The trace, the frame statistics and the jobs' adapter are plain C too
+    # (posix_jobs.c without HALO_JOBS_ENABLED: the job graph is not built, the
+    # jobs stay off).
+    guest_posix = {"posix_ui_font.c": f"-I{STB_DIR}", "posix_trace.c": "", "posix_frame_stats.c": "",
+                   "posix_jobs.c": ""}
     for source in sorted((LINUX_DIR / "src").glob("*.c")):
         if source.name in guest_posix:
             objects.append(guest_object(source, f"{platform_cflags} {guest_posix[source.name]}"))
@@ -509,6 +513,9 @@ def generate_android_build(n: Writer, sln: Any) -> None:
             objects.append(guest_object(source, f"{platform_cflags} "
                                                 f"{updater_defines(getattr(sln, 'port_release', False))}"))
             continue
+        objects.append(guest_object(source, platform_cflags))
+    # the trace's ring and capture (engine/core/trace; posix_trace.c)
+    for source in (Path("engine/core/trace/trace.c"), Path("engine/core/trace/trace_capture.c")):
         objects.append(guest_object(source, platform_cflags))
     # the high-res HUD's textures (port/assets/hud; port/linux/src/hud_hires.c)
     for source in (hud_assets_build(n, "android", gen_dir / "hud_hires_assets.c")

@@ -74,6 +74,9 @@ SERVER_EXCLUDED = {
     "port/linux/src/sdl_platform.c",
     "port/linux/src/xinput_sdl.c",
     "port/linux/src/updater.c",
+    # (no GPU driver to keep from the trace_marker; and in a static program
+    # its open() finds no C library's open to pass calls to: dlsym is NULL)
+    "port/linux/src/posix_trace_marker.c",
 }
 SERVER_DEFINES = ["-DHALO_SERVER"]
 OUTPUT_NAME = "chupathingyce-server"

@@ -350,6 +350,23 @@ BOOL platform_ui_pointer_read(struct platform_ui_pointer *pointer)
 	return FALSE;
 }
 
+BOOL platform_scoreboard_pointer(BOOL offered, struct platform_ui_pointer *pointer)
+{
+	(void)offered;
+	memset(pointer, 0, sizeof(*pointer));
+	return FALSE;
+}
+
+/* (no window, so no Screenshot action) */
+void platform_screenshot_request(void)
+{
+}
+
+BOOL platform_screenshot_take_request(void)
+{
+	return FALSE;
+}
+
 void platform_input_read(struct platform_input_state *state, BOOL consume_motion)
 {
 	(void)consume_motion;
