@@ -318,20 +318,13 @@ struct geosphere *geosphere_new(
 					&vertex_index, &triangle_strip_vertex_indices_index, vertex_subdivision_indices);
 			}
 
-			/* BUG (preserved for exact matching): at segment_count == 1,
-			 * January fills the allocated strip buffer but rejects equality.
-			 * A corrected build should allow a fully filled valid buffer.
-			 */
+			/* port: a full strip buffer is allowed (January's < refused it) */
 			match_assert("c:\\halo\\SOURCE\\math\\geometry.c", 98,
-				triangle_strip_vertex_indices_index < (NUMBER_OF_VERTICES_PER_TRIANGLE + 1) * result->triangle_count);
+				triangle_strip_vertex_indices_index <= (NUMBER_OF_VERTICES_PER_TRIANGLE + 1) * result->triangle_count);
 			match_assert("c:\\halo\\SOURCE\\math\\geometry.c", 99, vertex_index == result->vertex_count);
 		}
 		else
 		{
-			/* BUG (preserved for exact matching): January frees allocated
-			 * children but returns the owner with dangling member pointers.
-			 * A corrected build should free the owner and return NULL.
-			 */
 			if (result->vertices)
 			{
 				match_free("c:\\halo\\SOURCE\\math\\geometry.c", 103, result->vertices);
@@ -340,6 +333,10 @@ struct geosphere *geosphere_new(
 			{
 				match_free("c:\\halo\\SOURCE\\math\\geometry.c", 104, result->triangle_strip_vertex_indices);
 			}
+			/* port: freed and none returned (January returned it with freed
+			members) */
+			match_free("c:\\halo\\SOURCE\\math\\geometry.c", 105, result);
+			result = NULL;
 		}
 
 		if (vertex_subdivision_indices)
