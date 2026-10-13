@@ -1,6 +1,6 @@
-# Contributing to ChupathingyCE
+# Contributing to this fork
 
-ChupathingyCE is a community build of [OpenCE](https://github.com/OpenCommunityEdition/OpenCE). Fixes that belong in OpenCE itself are best sent there; we merge OpenCE regularly.
+This repository is a fork of [ChupathingyCE](https://github.com/ChupathingyCE/chupathingyce), which is based on [OpenCE](https://github.com/OpenCommunityEdition/OpenCE). The fork keeps the upstream game and compatibility work while developing WIP Forge mode, Infection, multiplayer bots, and an opt-in macOS Metal renderer. Changes intended for this fork should be proposed here; broadly useful fixes may also be offered upstream.
 
 ## Getting involved
 
@@ -15,11 +15,11 @@ Contributors are credited in the release notes.
 
 ## Pull requests
 
-- **Open them against `ChupathingyCE/chupathingyce`'s `main`.** This repository is a GitHub fork, so GitHub's "New pull request" page suggests `OpenCommunityEdition/OpenCE` first: change the base repository to ChupathingyCE. With the GitHub CLI, run `gh repo set-default ChupathingyCE/chupathingyce` once in your clone.
+- Open pull requests against this repository's `main` branch. If a change is intended for ChupathingyCE or OpenCE too, prepare a separate upstream pull request after it has been reviewed here.
 - One change per pull request, with how you tested it (which platforms you built and ran).
-- The game protocol stays OpenCE's: don't change how games are joined or what's sent on the wire. New networked features go on ChupathingyCE's own channel, falling back silently when the other side is OpenCE.
+- Keep the OpenCE game protocol compatible. Any change to network messages or other machine-agreed behavior must raise `HALO_PORT_NETWORK_VERSION` and document compatibility; see `AGENTS.md` and `port/linux/NETCODE.md`.
 - The 32-bit builds must stay byte-identical unless the change is meant for them: `tools/port_neutrality_check.py` checks it.
-- Commit messages, pull requests and issues are public, and they're posted to the ChupathingyCE Discord.
+- Commit messages, pull requests and issues are public. Do not include private information or copyrighted game data.
 
 ## Using AI tools
 
@@ -33,6 +33,7 @@ You can use AI tools when you contribute. You're responsible for what you submit
 - **1.0.0** comes once the game is feature-complete and stable on every platform.
 
 Test builds are the `nightly` release and `-testing` tags, outside the numbering. The network version is separate from the release version: a hotfix changes it only when cross-play needs it.
+
 ## Bugs
 
 Use [the bug report form](https://github.com/ChupathingyCE/chupathingyce/issues/new?template=bug.yml), or #bug-reports on the [Discord](https://discord.gg/4BUm2FwuCB).
