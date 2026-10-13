@@ -62,6 +62,11 @@ Their live camera/split-screen validation remains pending.
 - Some source screenshots and visual-only case studies lack transcribed code or
   explanatory text. Do not infer an exact algorithm from those descriptions.
 
+The engine-specific state boundaries, scoring semantics and release gates are
+now audited in [bot-objective-modes.md](bot-objective-modes.md). In particular,
+the bot controller does not consume ambitions yet, a friendly CTF return does
+not acquire a weapon, and King's scoring area is a hull rather than a circle.
+
 ## Recommended implementation order
 
 1. **Movement/navigation validation first.** Establish fresh reproducible evidence

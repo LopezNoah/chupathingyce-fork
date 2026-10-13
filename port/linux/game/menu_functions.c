@@ -93,6 +93,9 @@ their handlers open opens.
 /* (its games on Halo PC maps: server_browser.c) */
 #include "halo_map_families.h"
 #include "halo_server_browser.h"
+#if defined(HALO_FEATURE_BOTS) && defined(HALO_GAME_BROWSER)
+#include "features/bots/bot_lobby.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -5680,6 +5683,66 @@ static void gametype_engine_name(struct widget_instance *text_box)
 		text_box->parameters.text_box.string_list_index = strings[PIN(variant->game_engine_index, 0, 5)];
 }
 
+/* The XML lobby owns widgets; bot_lobby.c owns all values and launch checks. */
+#if defined(HALO_FEATURE_BOTS) && defined(HALO_GAME_BROWSER)
+static short bot_lobby_row(struct widget_instance *widget)
+{
+	short row;
+	char name[32];
+	if (!widget) return NONE;
+	for (row = 0; row < 8; row++) /* the shared lobby's eight settings */
+	{
+		snprintf(name, sizeof(name), "bot_row_%d", row);
+		if (!strcmp(widget->name, name)) return row;
+	}
+	return NONE;
+}
+
+static void bot_lobby_widget_text(struct widget_instance *widget, char const *value)
+{
+	wchar_t text[128];
+	short index;
+	/* Lobby labels, values and errors are bounded ASCII, not player input. */
+	for (index = 0; index < NUMBEROF(text) - 1 && value[index]; index++)
+		text[index] = (unsigned char)value[index];
+	text[index] = 0;
+	text_set_length(widget, text, NUMBEROF(text));
+}
+
+static void bot_lobby_update(struct widget_instance *screen)
+{
+	short row;
+	char name[32], text[128];
+	for (row = 0; row < 8; row++)
+	{
+		snprintf(name, sizeof(name), "bot_row_%d", row);
+		bot_lobby_xml_text(row, text, sizeof(text));
+		bot_lobby_widget_text(named(screen, name, 0), text);
+	}
+	bot_lobby_widget_text(named(screen, "bot_status", 0), bot_lobby_xml_status());
+}
+#endif
+
+/* Correct the stock description's indices only after the optional row. */
+static void bot_menu_update(struct widget_instance *list)
+{
+	struct widget_instance *focused = list->focused_child;
+	struct widget_instance *description = list->parameters.list.extended_description;
+	struct widget_instance *picture = description ? description->child : NULL;
+	struct widget_instance *text = picture ? picture->next : NULL;
+	if (!focused || !picture || !text) return;
+	if (!strcmp(focused->name, "multiplayer_type_bot_item"))
+	{
+		picture->animation.current_frame_index = 4; /* LAN game's picture */
+		text->parameters.text_box.string_list_index = 7;
+	}
+	else if (!strcmp(focused->name, "multiplayer_type_gametypes_item"))
+	{
+		picture->animation.current_frame_index = 6;
+		text->parameters.text_box.string_list_index = 6;
+	}
+}
+
 /* ---------- public code */
 
 boolean pc_menu_event_function_invoke(
@@ -5709,6 +5772,23 @@ boolean pc_menu_event_function_invoke(
 		{
 			platform_request_quit();
 		}
+		#if defined(HALO_FEATURE_BOTS) && defined(HALO_GAME_BROWSER)
+		else if (!strcmp(name, "port bot lobby open"))
+		{
+			bot_lobby_xml_open();
+		}
+		else if (!strcmp(name, "port bot lobby change"))
+		{
+			bot_lobby_xml_change(bot_lobby_row(widget),
+				event && event->type == 3 &&
+				event->data.button.index == _gamepad_binary_button_dpad_left ? -1 : 1);
+		}
+		else if (!strcmp(name, "port bot lobby start"))
+		{
+			if (!bot_lobby_xml_start()) return FALSE;
+			*widget_deleted = TRUE; /* the shared launch path closed every widget */
+		}
+#endif
 		else if (!strcmp(name, "profile set edit begin"))
 		{
 			return pc_menu_profile_edit_begin();
@@ -6055,7 +6135,13 @@ void pc_menu_game_data_function_invoke(
 	/* (a text field whose screen has gone: let go of) */
 	if (text_field.row && system_milliseconds() - text_field_shown_time > 500)
 		text_field_end(FALSE);
-	if (!strcmp(name, "solo map list update"))
+	if (!strcmp(name, "port bot menu update"))
+		bot_menu_update(widget);
+#if defined(HALO_FEATURE_BOTS) && defined(HALO_GAME_BROWSER)
+	else if (!strcmp(name, "port bot lobby update"))
+		bot_lobby_update(widget->parent ? widget->parent : widget);
+#endif
+	else if (!strcmp(name, "solo map list update"))
 		level_list_update(widget);
 	else if (!strcmp(name, "mp map list update"))
 		map_list_update(widget);

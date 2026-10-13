@@ -71,6 +71,17 @@ It needs `rsvg-convert`, Pillow, NumPy and SciPy. It writes every file, so
 `git status` should show only the screens meant to change; then
 `ninja linux` (or `ninja android`) embeds them in the game.
 
+The optional Bot Match entry and native lobby can be refreshed without the
+external PC tags or image tools:
+
+```sh
+python3 tools/ce_menus.py --refresh-bot-menus
+```
+
+The full generator writes the same additions. Their settings and launch checks
+are shared with the Xbox lobby (`source/features/bots/bot_lobby.c`); no persistent
+config values are changed by the setup screen.
+
 A settings screen (Controls Setup, Gamepads, Mouse, Audio, Video or Network
 Setup) is changed in `tools/port_settings.py`, not in its XML, and written
 with the command above. Teamplay Options also has the port's VOTE KICK
@@ -141,6 +152,7 @@ be a child of many).
 | `controller` | `1` to `4`, or `any` (the default); a `<child>`'s or `child_controller`: the one it is for |
 | `auto_close`, `auto_close_fade` | It closes itself after this many milliseconds, fading for this many |
 | `platform` | `desktop` or `android`: it is only there. Every element takes this. |
+| `feature` | `bots`: included only with both bots and the game browser built in. Every element takes this; it combines with `platform`. |
 
 Widget flags: `pass_unhandled_to_focused_child` (an event it does not handle
 goes to its focused child: a screen needs it for its list to get events),

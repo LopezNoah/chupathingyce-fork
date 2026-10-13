@@ -379,6 +379,7 @@ static char const *const port_function_names[] =
 	/* (the server browser's password screen) */
 	"port password init", "port password edit", "port password join", "port password back",
 	"port active profile edit begin", "port active profile edit end",
+	"port bot lobby open", "port bot lobby change", "port bot lobby start",
 };
 
 /* the PC version's game data functions that the Xbox's have not, from
@@ -400,6 +401,7 @@ static char const *const port_game_data_input_names[] =
 	/* (the profile settings' picture: the Xbox's of the button settings,
 	on Gamepad Setup's row) */
 	"port gamepad layout preview",
+	"port bot lobby update", "port bot menu update",
 };
 
 static struct
@@ -1041,6 +1043,10 @@ static void *widget_build(long widget_index)
 		return NULL;
 	strncpy(definition->name, leaf, sizeof(definition->name) - 1);
 	definition->type = _widget_type_container;
+	/* Pause-only widgets use art absent from ui.map. Their names are reserved
+	   here, but their references are built only in an actual game map. */
+	if (!build.game_map && !strncmp(source->name, "in_game/", 8))
+		return definition;
 	if (source->type)
 	{
 		long type = name_index(source->type, widget_type_names, NUMBEROF(widget_type_names));

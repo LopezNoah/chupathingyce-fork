@@ -277,7 +277,7 @@ def _setting_screen(folder: str, spec: dict) -> list:
     rows, extra = [], []
     place = -1
     places = {"desktop": -1, "android": -1}
-    for index, (label, setting, choices, _, platform, *named) in enumerate(spec["rows"]):
+    for index, (_label, setting, choices, _, platform, *named) in enumerate(spec["rows"]):
         key = named[0] if named else setting.split(".", 1)[1]
         row = f"{base}/op_{key}"
         shares = setting in spec.get("same_place", ()) or key in spec.get("same_place", ())
@@ -310,7 +310,7 @@ def _setting_screen(folder: str, spec: dict) -> list:
                           ("header_bitmap", "bitmaps/arrow_sm_left"), ("footer_bitmap", "bitmaps/arrow_sm_right"),
                           ("header_bounds", "7 -6 19 0"), ("footer_bounds", "7 150 19 156")],
                          ['<on event="created" run="port setting load"/>'])
-    for index, (label, category_folder, _) in enumerate(spec.get("categories", ())):
+    for index, (_label, category_folder, _) in enumerate(spec.get("categories", ())):
         key = category_folder.rsplit("/", 1)[-1]
         row = f"{base}/op_{key}"
         target = f"{PE}/{category_folder}/{SCREENS[category_folder]['screen']}"
@@ -466,6 +466,7 @@ STRING_OVERRIDES.update({
         "Host a game on your LAN\\nonly.",
         "Play the campaign with a\\nfriend in split screen:\\nplayer 2 on a gamepad.",
         "Set all the attributes for your \\nmultiplayer gametypes and\\nkeep them for future use.",
+        "Play a private match with bots.\\nChoose teams, difficulty and\\nstarting weapons.",
     ],
     "main_menu/gametype_select/var_gametype_banks": ["STANDARD", "CUSTOM"],
     # (the PC's weapon sets, then the Xbox's NO GRENADES: menu_functions.c's
@@ -538,9 +539,12 @@ WIDGET_PATCHES = {
         f'<on event="start" run="mp type set mode" open="{MT}/join_game/join_game_screen"/>',
         '<on event="left_mouse" run="mouse emit accept event"/>',
     ]},
-    # (Co-op, after Create Game's: _coop)
-    f"{MT}/multiplayer_type_select_list": {"insert_before": {
-        f"{MT}/multiplayer_type_gametypes_item": [f'<child widget="{MT}/multiplayer_type_coop_item" y="309"/>'],
+    # Co-op and the optional bot lobby, after Create Game's.
+    f"{MT}/multiplayer_type_select_list": {"inputs": ["port bot menu update"], "insert_before": {
+        f"{MT}/multiplayer_type_gametypes_item": [
+            f'<child widget="{MT}/multiplayer_type_coop_item" y="309"/>',
+            f'<child widget="{MT}/multiplayer_type_bot_item" y="342" feature="bots"/>',
+        ],
     }},
     # (the Map screen's and New Game's lists: SINGLEPLAYER or MULTIPLAYER
     # maps, the first row's chooser's (_map_kind); B on the Map screen goes
@@ -578,10 +582,10 @@ WIDGET_PATCHES = {
     # (Item Options' loadout rows, over its buttons)
     "main_menu/settings_select/multiplayer_setup/item_options_edit/item_options_menu": {"insert_before": {
         "main_menu/settings_select/multiplayer_setup/item_options_edit/item_button_bar": [
-            f'<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_map_weapons" x="54" y="163"/>',
-            f'<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_loadout" x="54" y="193"/>',
-            f'<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_primary_weapon" x="54" y="223"/>',
-            f'<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_secondary_weapon" x="54" y="253"/>',
+            '<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_map_weapons" x="54" y="163"/>',
+            '<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_loadout" x="54" y="193"/>',
+            '<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_primary_weapon" x="54" y="223"/>',
+            '<child widget="main_menu/settings_select/multiplayer_setup/item_options_edit/op_secondary_weapon" x="54" y="253"/>',
         ]}},
     # (the PC's Vehicles row's Start opened Item Options)
     "main_menu/settings_select/multiplayer_setup/playlist_edit/playlist_edit_vehicles_list_item": {"handlers": [
@@ -1257,6 +1261,98 @@ def _teamplay_votekick_extra() -> list:
     return lines
 
 
+def _bot_lobby() -> list:
+    """Native XML widgets sharing the Xbox overlay's bounded lobby model."""
+    base = f"{MT}/bots"
+    lines = _widget(f"{MT}/multiplayer_type_bot_item",
+                    [("type", "text"), ("left", 51), ("width", 232), ("height", 32),
+                     ("feature", "bots"), ("bitmap", "bitmaps/list_item_bkd"), ("text", "BOT MATCH"),
+                     ("font", "ui\\large_ui"), ("color", "#FF2896FF"), ("text_x", 13), ("text_y", 5)],
+                    [f'<on event="a start" open="{base}/bot_screen"/>',
+                     '<on event="left_mouse" run="mouse emit accept event"/>'])
+    lines += _widget(f"{base}/bot_screen",
+                     [("feature", "bots"), ("width", 640), ("height", 480),
+                      ("bitmap", "bitmaps/gradient"), ("flags", "pass_unhandled_to_focused_child")],
+                     ['<on event="created" run="port bot lobby open"/>',
+                      '<on event="start" run="port bot lobby start"/>',
+                      '<on event="b back" back="true"/>',
+                      f'<child widget="{base}/bot_title" x="40" y="20"/>',
+                      f'<child widget="{base}/bot_list"/>',
+                      f'<child widget="{base}/bot_status" x="40" y="405"/>',
+                      f'<child widget="{base}/bot_help" x="40" y="439"/>'])
+    lines += _widget(f"{base}/bot_list",
+                     [("feature", "bots"), ("type", "column_list"), ("width", 640), ("height", 400),
+                      ("flags", "pass_unhandled_to_focused_child up_down_tabs_items")],
+                     ['<data input="port bot lobby update"/>',
+                      *[f'<child widget="{base}/bot_row_{row}" x="40" y="{80 + row * 34}"/>' for row in range(8)],
+                      f'<child widget="{base}/bot_start" x="40" y="365"/>'])
+    for row in range(8):
+        lines += _widget(f"{base}/bot_row_{row}",
+                         [("feature", "bots"), ("type", "text"), ("width", 560), ("height", 30),
+                          ("bitmap", "bitmaps/list_item_bkd"), ("font", "ui\\small_ui"),
+                          ("color", "#FF2896FF"), ("text_x", 13), ("text_y", 5)],
+                         ['<on event="left right a" run="port bot lobby change"/>',
+                          '<on event="left_mouse" run="mouse emit accept event"/>'])
+    for key, caption, top, font in (
+        ("title", "BOT MATCH", 42, "large"),
+        ("start", "START BOT MATCH", 30, "large"),
+        ("status", "", 28, "small"),
+        ("help", "Left/Right: change   Enter: select   Back: cancel", 24, "small"),
+    ):
+        handlers = ['<on event="a start" run="port bot lobby start"/>',
+                    '<on event="left_mouse" run="mouse emit accept event"/>'] if key == "start" else []
+        lines += _widget(f"{base}/bot_{key}",
+                         [("feature", "bots"), ("type", "text"), ("width", 560), ("height", top),
+                          ("text", caption if key != "status" else None), ("font", f"ui\\{font}_ui"), ("color", "#FF2896FF"),
+                          ("text_x", 13), ("text_y", 5)], handlers)
+    return lines
+
+
+def refresh_bot_menus(menus) -> None:
+    """Rewrite only the bot additions without needing external PC tag assets.
+
+    The full ce_menus.py generator emits the same widgets and patches. Keep
+    unrelated generated art/screens intact when refreshing this feature.
+    """
+    import json
+    import re
+    screen = menus / "ce/main_menu.multiplayer_type_select.xml"
+    text = screen.read_text()
+    anchor = f'\t\t<child widget="{MT}/multiplayer_type_coop_item" y="309"/>'
+    bot_child = f'\t\t<child widget="{MT}/multiplayer_type_bot_item" y="342" feature="bots"/>'
+    if bot_child not in text:
+        assert text.count(anchor) == 1
+        text = text.replace(anchor, anchor + "\n" + bot_child)
+    anchor = '\t\t<data input="multiplayer type menu update desc"/>'
+    bot_input = '\t\t<data input="port bot menu update"/>'
+    if bot_input not in text:
+        assert text.count(anchor) == 1
+        text = text.replace(anchor, anchor + "\n" + bot_input)
+    screen.write_text(text)
+    strings = menus / "ce/strings.xml"
+    text = strings.read_text()
+    name = f"{MT}/multiplayer_option_descriptions"
+    block = f'\t<strings name="{name}">\n'
+    block += "".join(f'\t\t<string text={quoteattr(value)}/>\n' for value in STRING_OVERRIDES[name])
+    block += "\t</strings>"
+    text, count = re.subn(r'\t<strings name="' + re.escape(name) + r'">.*?\t</strings>',
+                          lambda _: block, text, flags=re.S)
+    assert count == 1
+    strings.write_text(text)
+    name = f"{MT}/bots".replace("/", ".") + ".xml"
+    (menus / "ce" / name).write_text("\n".join(multiplayer_files()[name]))
+    manifest = menus / "menus.json"
+    try:
+        data = json.loads(manifest.read_text())
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Cannot read menu manifest {manifest}") from error
+    path = "ce/" + name
+    if path not in data["files"]:
+        index = next((index for index, item in enumerate(data["files"]) if item > path), len(data["files"]))
+        data["files"].insert(index, path)
+    manifest.write_text(json.dumps(data, indent=1) + "\n")
+
+
 def multiplayer_files() -> dict:
     """the port's multiplayer widgets: the browser's additions, the server
     settings, the lobby"""
@@ -1268,6 +1364,7 @@ def multiplayer_files() -> dict:
         f"{MT}/server_settings".replace("/", ".") + ".xml": head + _server_settings() + ["</menus>", ""],
         f"{MT}/lobby".replace("/", ".") + ".xml": head + _lobby() + ["</menus>", ""],
         f"{MT}/coop".replace("/", ".") + ".xml": head + _coop() + ["</menus>", ""],
+        f"{MT}/bots".replace("/", ".") + ".xml": head + _bot_lobby() + ["</menus>", ""],
         "main_menu/new_select".replace("/", ".") + ".port.xml": head + _map_kind() + ["</menus>", ""],
         "main_menu/settings_select/multiplayer_setup/item_options_edit".replace("/", ".") + ".port.xml": head + _item_options_extras() + ["</menus>", ""],
     }
@@ -1314,7 +1411,7 @@ def _pause_row(name: str, label: list, handlers: list) -> list:
     return _widget(name, label + PAUSE_ROW + DESKTOP, handlers)
 
 
-def _opens(screen: str, run: str = None) -> list:
+def _opens(screen: str, run: str | None = None) -> list:
     action = (f'run="{run}" ' if run else "") + f'open="{screen}"'
     return [f'<on event="a" {action}/>', f'<on event="start" {action}/>']
 

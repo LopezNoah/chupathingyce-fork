@@ -138,7 +138,7 @@ static void select_profile(void)
         player_ui_set_active_player_profile(0, index, &profile);
 }
 
-static void start_match(void)
+static boolean start_match(void)
 {
     struct game_variant variant;
     struct game_variant_options options;
@@ -146,17 +146,20 @@ static void start_match(void)
     if (!lobby.values[2] && !lobby.values[3])
     {
         snprintf(lobby.status, sizeof(lobby.status), "Add at least one bot.");
-        return;
+        return FALSE;
     }
     snprintf(path, sizeof(path), "levels\\test\\%s\\%s",
         maps[lobby.values[0]][0], maps[lobby.values[0]][0]);
     if (!cache_files_map_present(path, 0) || !cache_files_map_plays_multiplayer(path, build))
     {
         snprintf(lobby.status, sizeof(lobby.status), "Map unavailable: check your Xbox maps.");
-        return;
+        return FALSE;
     }
     if (!bots_prepare_local_match(lobby.values[2], lobby.values[3], lobby.values[4]))
-        return;
+    {
+        snprintf(lobby.status, sizeof(lobby.status), "Invalid bot match settings.");
+        return FALSE;
+    }
     game_engine_get_variant_by_name(&variant, lobby.values[1] ? "team_slayer" : "slayer");
     game_variant_options_default(&variant, &options);
     options.auto_team_balance = FALSE;
@@ -184,6 +187,7 @@ static void start_match(void)
     /* main_defer_map_map_change cancels the flag; the shell's single-player
        transition queues it. Without this the widgets close over ui.map's ring. */
     main_menu_switch_to_single_player();
+    return TRUE;
 }
 
 static void press(short button)
@@ -288,6 +292,36 @@ static char const *value_text(short row, char *text, size_t size)
     default: snprintf(text, size, "%d", value); return text;
     }
 }
+
+/* port: XML widgets use the same bounded selectors and private launch path,
+   without activating the overlay or consuming the widget system's events. */
+void bot_lobby_xml_open(void)
+{
+    bot_lobby_open();
+    lobby.active = FALSE;
+}
+
+void bot_lobby_xml_change(short row, short direction)
+{
+    if (row < 0 || row >= ROWS || (direction != -1 && direction != 1)) return;
+    lobby.row = row;
+    change(direction);
+}
+
+void bot_lobby_xml_text(short row, char *text, size_t size)
+{
+    char value[64];
+    char const *shown;
+    if (!text || !size) return;
+    text[0] = 0;
+    if (row < 0 || row >= ROWS) return;
+    shown = row_mutable(row) ? value_text(row, value, sizeof(value)) :
+        (row == 2 ? "Not used in FFA" : "Map default");
+    snprintf(text, size, "%s:  %s", labels[row], shown);
+}
+
+char const *bot_lobby_xml_status(void) { return lobby.status; }
+boolean bot_lobby_xml_start(void) { return start_match(); }
 
 static void draw_rows(void)
 {

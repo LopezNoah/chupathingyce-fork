@@ -350,7 +350,7 @@ static int parse_long(struct reader *reader, const char *name, const char *text,
 }
 
 /* the element's attributes into the table's fields; one not in the table
-(but platform, which for_this_platform reads) is an error */
+(but platform and feature, which for_this_platform reads) is an error */
 static void read_attributes(struct reader *reader, const char *element, const XML_Char **attributes,
 	const struct attribute *table, size_t count)
 {
@@ -361,7 +361,7 @@ static void read_attributes(struct reader *reader, const char *element, const XM
 		const char *name = attributes[index], *value = attributes[index + 1];
 		size_t field;
 
-		if (!strcmp(name, "platform"))
+		if (!strcmp(name, "platform") || !strcmp(name, "feature"))
 			continue;
 		for (field = 0; field < count; field++)
 		{
@@ -387,11 +387,13 @@ static long current_line(struct reader *reader)
 	return (long)XML_GetCurrentLineNumber(reader->parser);
 }
 
-/* whether the element is for this platform (its platform attribute) */
+/* Build-time filtering keeps optional bot widgets out of ordinary builds. */
 static int for_this_platform(struct reader *reader, const XML_Char **attributes)
 {
 	int index;
+	int included = 1;
 
+	/* Expat bounds this attribute list by the input element's size. */
 	for (index = 0; attributes[index]; index += 2)
 	{
 		if (!strcmp(attributes[index], "platform"))
@@ -404,13 +406,24 @@ static int for_this_platform(struct reader *reader, const XML_Char **attributes)
 				return 1;
 			}
 #ifdef HALO_ANDROID
-			return !strcmp(platform, "android");
+			included = included && !strcmp(platform, "android");
 #else
-			return !strcmp(platform, "desktop");
+			included = included && !strcmp(platform, "desktop");
+#endif
+		}
+		else if (!strcmp(attributes[index], "feature"))
+		{
+			if (strcmp(attributes[index + 1], "bots"))
+			{
+				reader_error(reader, "feature=\"%s\" is not \"bots\"", attributes[index + 1]);
+				return 1;
+			}
+#if !defined(HALO_FEATURE_BOTS) || !defined(HALO_GAME_BROWSER)
+			included = 0;
 #endif
 		}
 	}
-	return 1;
+	return included;
 }
 
 /* room for one more element in an array of count; NULL when out of memory,

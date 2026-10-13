@@ -42,13 +42,9 @@ import struct
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Optional
 from xml.sax.saxutils import quoteattr
 
-from PIL import Image
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hud_assets import bleed, render_svg  # noqa: E402
 import port_settings  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -174,7 +170,11 @@ class Tags:
         self.root = tags
         self.types = {}
         for path in sorted(definitions.glob("*.json")):
-            for item in json.loads(path.read_text()):
+            try:
+                items = json.loads(path.read_text())
+            except (OSError, ValueError) as error:
+                raise ValueError(f"Cannot read tag definitions {path}") from error
+            for item in items:
                 self.types.setdefault(item["name"], item)
 
     def size(self, field: dict) -> int:
@@ -275,7 +275,7 @@ def text_value(utf16: bytes) -> str:
     return text.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "")
 
 
-def flag_names(value: int, names: list) -> str:
+def flag_names(value: int, names: list) -> str | None:
     return " ".join(name for bit, name in enumerate(names) if value >> bit & 1) or None
 
 
@@ -287,7 +287,7 @@ def bounds_text(bounds: tuple) -> str:
 
 
 class Art:
-    def __init__(self, tags: Tags, redraws: Path, placeholder: Path, shown: dict, pictures: Optional[Path]):
+    def __init__(self, tags: Tags, redraws: Path, placeholder: Path, shown: dict, pictures: Path | None):
         self.tags, self.redraws, self.shown, self.pictures_folder = tags, redraws, shown, pictures
         self.placeholder = Image.open(placeholder).convert("RGBA")
         self.pictures = []  # (frame, size, PC picture) of the frames drawn as the placeholder
@@ -462,7 +462,7 @@ def widget_xml(tag: str, widget: dict, tags: Tags, functions: list, inputs: list
         pairs.append(("font", font))
     alpha, red, green, blue = widget["text color"]
     if (alpha, red, green, blue) != (0, 0, 0, 0):
-        pairs.append(("color", "#%02X%02X%02X%02X" % tuple(round(c * 255) for c in (alpha, red, green, blue))))
+        pairs.append(("color", "#" + "".join(f"{round(c * 255):02X}" for c in (alpha, red, green, blue))))
     pairs += [
         ("align", ALIGN[widget["justification"]] if widget["justification"] else None),
         ("text_flags", flag_names(widget["flags 1"], TEXT_FLAGS)),
@@ -545,13 +545,27 @@ def engine_names(source: Path, start: str, count: int) -> list:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--tags", type=Path, required=True)
-    parser.add_argument("--definitions", type=Path, required=True)
-    parser.add_argument("--redraws", type=Path, required=True)
-    parser.add_argument("--placeholder", type=Path, required=True, help="the picture for frames with no redraw")
+    parser.add_argument("--refresh-bot-menus", action="store_true",
+                        help="rewrite only bot lobby XML and its menu entry; no external tag assets needed")
+    parser.add_argument("--tags", type=Path)
+    parser.add_argument("--definitions", type=Path)
+    parser.add_argument("--redraws", type=Path)
+    parser.add_argument("--placeholder", type=Path, help="the picture for frames with no redraw")
     parser.add_argument("--pictures", type=Path,
                         help="the PC version's pictures, as PNGs by tag path: only where each is, to place its placeholder")
     arguments = parser.parse_args()
+    if arguments.refresh_bot_menus:
+        port_settings.refresh_bot_menus(MENUS)
+        return
+    for name in ("tags", "definitions", "redraws", "placeholder"):
+        if getattr(arguments, name) is None:
+            parser.error(f"--{name} is required for full menu generation")
+    # Bot-only refresh needs no image tools or third-party Python packages.
+    global Image, bleed, render_svg
+    from importlib import import_module
+
+    from hud_assets import bleed, render_svg
+    Image = import_module("PIL.Image")
     tags = Tags(arguments.tags, arguments.definitions)
     # (the names of the Xbox's own as the game has them, which the tags' own
     # names give a little differently: "create&edit", "NULL")
@@ -562,7 +576,10 @@ def main() -> None:
     inputs[:41] = engine_names(ROOT / "port/linux/game/menu_tags.c", "game_data_input_names[] =", 41)
     for folder in (CE, SVG_COPIES, MENUS / "port_svg"):
         if folder.exists():
-            shutil.rmtree(folder)
+            try:
+                shutil.rmtree(folder)
+            except OSError as error:
+                raise OSError(f"Cannot replace generated menus in {folder}") from error
     CE.mkdir(parents=True)
     widgets = reachable(tags)
     # the sizes the widgets show their bitmaps at

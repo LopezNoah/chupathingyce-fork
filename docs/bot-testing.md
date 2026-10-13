@@ -553,3 +553,35 @@ teammates over (bot 10, seat 0, in `T143631`): driving is not covered.
   driving remain unverified.
 - Only Slayer and Team Slayer are supported. Objective modes, Android builds,
   and other platform builds have not been verified by this bot test procedure.
+
+## Native PC/XML lobby validation (2026-10-13)
+
+`tools/check_bot_lobby_live.py` now accepts `--menus pc` as well as `xbox`.
+The PC run opens Multiplayer, navigates its real BOT MATCH entry, changes the
+native XML rows with keyboard arrows, and starts a private match. It does not
+open the overlay directly or inject a gameplay/network-test launch.
+
+Both hidden-window Metal runs passed: Battle Creek loaded with one friendly
+and two enemy ODST bots and the custom Assault Rifle/Magnum selection. Evidence:
+
+- PC: `/private/tmp/bot-lobby-pc-checks/bot-lobby-e93lyw3z/`.
+- Xbox regression: `/private/tmp/bot-lobby-xbox-checks/bot-lobby-_vjgc6f2/`.
+
+The first PC attempts caught Metal's separate XML reader and pause-only widget
+references to art absent from ui.map. Both were fixed before the passing run;
+those early failures remain in the same artifact parent directory.
+
+`tools/test_bot_lobby.py` tests both frontends' shared model/launch path under
+ASan/UBSan. `tools/test_bot_lobby_xml.py` checks generated widgets, refresh
+idempotence, and both production readers' feature/platform filters in eight
+build combinations, also under ASan/UBSan. Together with `test_touch_menu.py`,
+4 tests passed. The wider feature suite had one unrelated existing fixture
+failure: `test_settings_sections` does not define `DEFAULT_TEXTURE_CACHE_MB`.
+
+`ninja macos` passed with bots enabled and disabled. A hidden five-second
+no-bots PC-menu smoke loaded 926 widgets without XML fallback; optional bot
+widgets were filtered. The original `configure_args = --macos-metal` was
+restored. `ninja android` was attempted, but no Android target/NDK is available
+in this configured tree. Other platforms and visual/mouse/on-device layout
+validation remain unchecked. No objective mode has been enabled by this work;
+see [the objective audit](bot-objective-modes.md).

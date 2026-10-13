@@ -26,11 +26,14 @@ def test_bot_lobby():
     globals_text = source[source.index("enum {"):source.index("boolean bot_lobby_active")]
     pending = bots[bots.index("static struct\n{\n\tboolean pending;"):bots.index("static short lobby_friendly_count")]
     functions = "\n".join(body(source, name) for name in
-                          ("row_mutable", "change", "start_match", "press", "button_event", "bot_lobby_process", "bot_lobby_pointer", "value_text", "draw_rows"))
+                          ("bot_lobby_open", "row_mutable", "change", "start_match", "press", "button_event", "bot_lobby_process", "bot_lobby_pointer", "value_text", "bot_lobby_xml_open", "bot_lobby_xml_change", "bot_lobby_xml_text", "bot_lobby_xml_status", "bot_lobby_xml_start", "draw_rows"))
     fixture = r'''
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
+#define csmemset memset
+#define csstrcasecmp strcasecmp
 typedef int boolean;
 typedef unsigned char byte;
 #define TRUE 1
@@ -91,6 +94,8 @@ static int get_next_event(struct event_record *e, int controller) {
     assert(controller==NONE); if(!has_event) return 0; *e=queued; has_event=0; return 1;
 }
 static void event_manager_flush(void) { has_event=0; }
+static long config_integer(char const *name) { assert(!strcmp(name,"bots.count")); return 0; }
+static char const *config_string(char const *name) { assert(!strcmp(name,"bots.skill")); return "marine"; }
 static void queue_button(short button, byte held) {
     queued.type=3; queued.data.button.index=(byte)button; queued.data.button.value=held; has_event=1;
 }
@@ -216,6 +221,26 @@ int main(void) {
     lobby.active=TRUE; lobby.values[1]=0; lobby.values[2]=0; lobby.values[3]=2;
     lobby.values[5]=0; start_match(); assert(!launched.teams && loadout.loadout==0);
     lobby.active=TRUE; pointer.right_clicks=1; bot_lobby_pointer(&pointer); assert(!lobby.active);
+    /* Native XML uses identical selectors without stealing widget input. */
+    bot_lobby_xml_open(); assert(!lobby.active && lobby.values[1]==1 && lobby.values[3]==1);
+    bot_lobby_xml_change(-1,1); bot_lobby_xml_change(8,1);
+    bot_lobby_xml_change(0,2); assert(lobby.values[0]==0);
+    bot_lobby_xml_change(0,-1); assert(lobby.values[0]==12);
+    bot_lobby_xml_text(0,text,sizeof(text)); assert(strstr(text,"Wizard"));
+    bot_lobby_xml_text(-1,text,sizeof(text)); assert(!text[0]);
+    bot_lobby_xml_text(8,text,sizeof(text)); assert(!text[0]);
+    bot_lobby_xml_text(0,text,1); assert(!text[0]);
+    bot_lobby_xml_text(0,NULL,0);
+    bot_lobby_xml_change(1,-1); bot_lobby_xml_change(2,1);
+    assert(!lobby.values[2]); /* FFA cannot add friendly bots */
+    bot_lobby_xml_change(3,-1);
+    assert(!bot_lobby_xml_start() && !lobby.active);
+    assert(!strcmp(bot_lobby_xml_status(),"Add at least one bot."));
+    bot_lobby_xml_change(3,1);
+    present=0; assert(!bot_lobby_xml_start());
+    assert(strstr(bot_lobby_xml_status(),"Map unavailable"));
+    present=1; available=1; assert(bot_lobby_xml_start());
+    assert(!lobby.active && !launched.teams && lobby_match.enemy_count==1);
     return 0;
 }
 '''
