@@ -115,6 +115,29 @@ int hud_hires_override_point_threshold(long asset)
 	return asset >= 0 && asset < hud_hires_asset_count() && hud_hires_embedded[asset].point_threshold;
 }
 
+/* ---------- sprites */
+
+unsigned long hud_hires_asset_sprites(long asset)
+{
+	if (asset < 0 || asset >= hud_hires_asset_count())
+		return 0;
+	return hud_hires_embedded[asset].sprites;
+}
+
+int hud_hires_sprites_drawable(long asset, unsigned long address, unsigned long level0_size)
+{
+	(void)asset;
+	(void)address;
+	(void)level0_size;
+	return 0;
+}
+
+void hud_hires_register_placeholder(long asset, unsigned long texture_data)
+{
+	(void)asset;
+	(void)texture_data;
+}
+
 /* ---------- decoding */
 
 static unsigned long big_endian_long(const unsigned char *bytes)

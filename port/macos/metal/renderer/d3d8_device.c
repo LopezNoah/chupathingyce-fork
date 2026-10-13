@@ -1502,6 +1502,18 @@ int halo_ui_pointer_update(int menus_active, struct halo_ui_pointer *pointer)
 }
 #endif
 
+/* the open scoreboard's pointer (game_engine.c): not wired to this renderer's
+platform layer yet (port/linux/src/sdl_platform.c's platform_scoreboard_pointer
+has no counterpart here), so there is none, as on Android: the scoreboard
+shows no line for picking players */
+int halo_scoreboard_pointer_update(int offered, struct halo_ui_pointer *pointer)
+{
+	(void)offered;
+	if (pointer)
+		memset(pointer, 0, sizeof(*pointer));
+	return -1;
+}
+
 /* takes up the display's shape and resolution, or the window's, if they
 have changed; between frames, since the game's layout and the targets must
 agree for a whole frame. Returns the width the game draws. */

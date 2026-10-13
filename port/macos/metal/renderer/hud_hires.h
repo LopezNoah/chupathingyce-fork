@@ -33,6 +33,10 @@ struct hud_hires_embedded
 	int coverage;
 	int point_threshold; /* red: exact discrete meter thresholds, zero elsewhere */
 	int title;
+	/* the bitmap sequences (a bit each) whose sprites the texture replaces
+	through a placeholder, or 0 for the whole bitmap: the generated table's
+	layout (tools/embed_assets.py), which must match port/linux/src/hud_hires.h */
+	unsigned int sprites;
 	const unsigned int *png;
 	unsigned int png_size;
 };
@@ -59,5 +63,12 @@ int hud_hires_override_coverage(long asset);
 /* whether its red holds exact segment thresholds, read unfiltered (d3d8_gl.c,
 nv2a_psh.c: point_threshold) */
 int hud_hires_override_point_threshold(long asset);
+/* the sequences whose sprites the texture is drawn for, or 0 */
+unsigned long hud_hires_asset_sprites(long asset);
+/* sprite placeholders (port/linux/game/hud_hires_tags.c) are not drawn by
+this renderer yet: never drawable, so those sprites are drawn from the
+bitmap as they are */
+int hud_hires_sprites_drawable(long asset, unsigned long address, unsigned long level0_size);
+void hud_hires_register_placeholder(long asset, unsigned long texture_data);
 
 #endif
