@@ -136,6 +136,24 @@ enum sn_status sn_query_result(const struct sn_query *query, const struct sn_res
    agent's radius in from the portal's ends. The corridor is unchanged; each
    point's polygon is the corridor polygon it enters. O(corridor^2) worst case. */
 void sn_route_straighten(struct sn_route *route, const struct sn_resource *resource);
+/* port: Collision-checked string pulling, for a route whose corridor was
+   searched with `clear`: the funnel knows only the polygons, so a pulled
+   segment can cut through scenery standing on them that the searched
+   center/portal path went around. `route` must be an unmodified
+   sn_query_result whose consecutive points `clear` has already passed.
+   Each new segment is checked one corridor polygon at a time on that
+   polygon's floor (a piece across a seam must also keep the agent's radius
+   from its open edges). A refused stretch is pulled again through the
+   original polygon center nearest the refusal, and a stretch with no center
+   left keeps its original points, so every segment of the result is either
+   checked or the search's own. At most SN_STRAIGHTEN_CHECKS_MAX calls to
+   `clear`: once they are spent the rest of the route stays original. A route
+   within one polygon is returned as it is, uncalled. False, with the route
+   untouched, only for no callback or an invalid or stale route. Uses the
+   same static scratch as sn_route_straighten; neither is reentrant. */
+enum { SN_STRAIGHTEN_CHECKS_MAX = 256 };
+bool sn_route_straighten_checked(struct sn_route *route, const struct sn_resource *resource,
+    sn_segment_clear clear, void *context);
 bool sn_route_current(const struct sn_route *route, const struct sn_resource *resource,
     uint64_t obstacle_revision);
 /* A short jump at current horizontal momentum. Units are per simulation tick;

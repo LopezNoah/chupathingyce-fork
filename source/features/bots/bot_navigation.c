@@ -6,9 +6,12 @@ is too sparse to represent walls, passages or the spaces between starts. This
 adapter routes over CE's validated walkable collision surfaces, checking each
 route edge with the spawned biped's live collision capsule before moving.
 
-Each active bot owns one bounded search and route. Search expands at most four
-polygons per tick; a blocked route waits for a bounded interval, marks one
-polygon temporarily unavailable and replans. Team bots patrol three lanes:
+Each active bot owns one bounded route; its searches queue for four shared
+workspaces (engine_ai/surface_navigation_jobs.h), which together place at most
+four searches' endpoints, expand at most 64 polygons and string-pull one found
+route per tick, however many bots there are. A blocked route waits for a
+bounded interval, marks one polygon temporarily unavailable and replans. Team
+bots patrol three lanes:
 pairs travel together in a lane, with opposite lateral offsets, and pairs in a
 lane occupy near/far positions. No map tags are changed and no movement bypasses
 Halo physics.
@@ -29,6 +32,7 @@ Halo physics.
 #include "navigation_world.h"
 #include "map_anchors.h"
 #include "bot_navigation.h"
+#include "engine_ai/surface_navigation_jobs.h"
 
 /* port/linux/src/platform.h's */
 void platform_log(char const *format, ...);
@@ -39,9 +43,6 @@ void platform_log(char const *format, ...);
 
 enum
 {
-	/* Search sweeps only static geometry, and each edge's verdict is cached for
-	the resource's life, so an expansion is usually a few array reads. */
-	BOT_NAVIGATION_EXPANSIONS_PER_TICK = 16,
 	BOT_NAVIGATION_TICKS_PER_METRE = TICKS_PER_SECOND, /* (bots walk faster than 1 m/s) */
 	BOT_NAVIGATION_PROGRESS_TICKS = TICKS_PER_SECOND,
 	BOT_NAVIGATION_REPLAN_DISTANCE = 12,
@@ -59,8 +60,19 @@ bot's route. Each bot checks its own next polygons instead (bot_nav_follow). */
 #define BOT_NAVIGATION_ROUTE_OBSTACLES 0
 #define BOT_NAVIGATION_BLOCK_LOOKAHEAD 6
 /* An airborne bot, or a target in a seat or mid-jump, is above the floor it will
-land on: look down this far, in bands of half the projection height. */
+land on: look down this far, in bands of half the projection height; a point
+against a wall or on a seam may move this far toward a usable polygon. */
 #define BOT_NAVIGATION_GROUND_DEPTH 3.f
+#define BOT_NAVIGATION_GROUND_HORIZONTAL 1.f
+
+/* Only this host's simulation thread uses these. Client n is bot number n+1.
+Tokens are never reused, even across map resets, so a delayed consumer cannot
+take another request's work; no borrowed unit pointers survive a tick. */
+static struct sn_jobs navigation_jobs;
+static long navigation_units[BOT_NAVIGATION_AGENTS_MAX]; /* the body its checks ignore */
+static uint64_t navigation_tokens[BOT_NAVIGATION_AGENTS_MAX]; /* its latest request */
+static long navigation_polled[BOT_NAVIGATION_AGENTS_MAX]; /* when its agent last asked */
+static uint64_t navigation_token;
 
 /* ---------- private prototypes */
 
@@ -68,6 +80,9 @@ static real bot_nav_abs(real value);
 static real bot_nav_horizontal_distance(struct sn_point a, struct sn_point b);
 static real bot_nav_distance(struct sn_point a, struct sn_point b);
 static struct sn_point bot_nav_position(long unit_index);
+static boolean bot_nav_client(struct bot_navigation_agent const *agent, uint32_t *client);
+static boolean bot_nav_refresh(struct bot_navigation_agent *agent, struct sn_point start,
+	struct sn_point goal);
 static boolean bot_nav_lane_axis(long team_index, real_point3d *home,
 	real *forward_x, real *forward_y, real *length);
 static uint32_t bot_nav_start_component(struct bot_navigation_agent *agent,
@@ -83,7 +98,8 @@ static enum bot_navigation_result bot_nav_route_step(struct bot_navigation_agent
 	long unit_index, struct sn_point goal, real speed, real arrival_distance,
 	boolean patrol, struct bot_navigation_command *command);
 static void bot_nav_log_failure(struct bot_navigation_agent *agent,
-	struct sn_resource const *resource, struct sn_point start, enum sn_status status);
+	struct sn_resource const *resource, enum sn_status status,
+	struct sn_jobs_diagnostics const *query);
 static enum bot_navigation_result bot_nav_search(struct bot_navigation_agent *agent,
 	long unit_index, struct sn_resource const *resource, struct sn_point start);
 static enum bot_navigation_result bot_nav_stuck(struct bot_navigation_agent *agent,
@@ -95,6 +111,71 @@ static enum bot_navigation_result bot_nav_follow(struct bot_navigation_agent *ag
 
 /* ---------- public code */
 
+/* The scheduler's collision check for a client: the structure and scenery
+(navigation_world_search_clear), ignoring the body its bot has now. */
+static bool bot_nav_search_clear(void *context, uint32_t client, uint64_t token,
+	struct sn_point a, uint32_t ap, struct sn_point b, uint32_t bp)
+{
+	struct unit_datum *unit;
+	long unit_index;
+
+	(void)context;
+	if (client >= BOT_NAVIGATION_AGENTS_MAX || token != navigation_tokens[client])
+		return false;
+	unit_index = navigation_units[client];
+	unit = unit_index != NONE ? unit_try_and_get(unit_index) : NULL;
+	if (!unit || TEST_FLAG(unit->object.damage_flags, _object_dead_bit))
+		return false;
+	return navigation_world_search_clear(&unit_index, a, ap, b, bp);
+}
+
+void bot_navigation_reset_all(void)
+{
+	uint32_t client;
+
+	sn_jobs_reset(&navigation_jobs);
+	for (client = 0; client < BOT_NAVIGATION_AGENTS_MAX; client++)
+	{
+		navigation_units[client] = NONE;
+		navigation_tokens[client] = 0;
+		navigation_polled[client] = NONE;
+	}
+}
+
+void bot_navigation_update(void)
+{
+	struct sn_resource const *resource = navigation_world_resource();
+	long now = game_time_get();
+	uint32_t client;
+
+	if (!resource)
+	{
+		bot_navigation_reset_all();
+		return;
+	}
+	/* (at most 32 clients) A request its agent did not ask after last tick
+	was abandoned: its leaf changed, or its bot left or was replaced. One whose
+	body died or was deleted cannot be checked. Either gives its place back. */
+	for (client = 0; client < BOT_NAVIGATION_AGENTS_MAX; client++)
+	{
+		struct unit_datum *unit;
+
+		if (!sn_jobs_active(&navigation_jobs, client, navigation_tokens[client]))
+			continue;
+		unit = navigation_units[client] != NONE ? unit_try_and_get(navigation_units[client]) : NULL;
+		if (unit && !TEST_FLAG(unit->object.damage_flags, _object_dead_bit) &&
+			navigation_polled[client] != NONE && navigation_polled[client] <= now &&
+			now - navigation_polled[client] <= 1)
+		{
+			continue;
+		}
+		sn_jobs_cancel(&navigation_jobs, client, navigation_tokens[client]);
+		navigation_units[client] = NONE;
+	}
+	sn_jobs_step(&navigation_jobs, resource, BOT_NAVIGATION_ROUTE_OBSTACLES,
+		(uint64_t)now, bot_nav_search_clear, NULL);
+}
+
 void bot_navigation_agent_initialize(
 	struct bot_navigation_agent *agent,
 	short bot_number,
@@ -105,6 +186,13 @@ void bot_navigation_agent_initialize(
 
 	if (!agent)
 		return;
+	/* (a request left by this slot's last bot is not this one's) */
+	if (bot_number > 0 && bot_number <= BOT_NAVIGATION_AGENTS_MAX)
+	{
+		sn_jobs_cancel(&navigation_jobs, (uint32_t)(bot_number - 1),
+			navigation_tokens[bot_number - 1]);
+		navigation_units[bot_number - 1] = NONE;
+	}
 	csmemset(agent, 0, sizeof(*agent));
 	agent->bot_number = bot_number;
 	agent->team_index = team_index;
@@ -125,8 +213,15 @@ void bot_navigation_agent_initialize(
 void bot_navigation_agent_reset_path(
 	struct bot_navigation_agent *agent)
 {
+	uint32_t client;
+
 	if (!agent)
 		return;
+	if (bot_nav_client(agent, &client))
+	{
+		sn_jobs_cancel(&navigation_jobs, client, navigation_tokens[client]);
+		navigation_units[client] = NONE;
+	}
 	if (agent->searching)
 	{
 		platform_log("bots: bot %d surface %s search abandoned after %ld ticks",
@@ -223,6 +318,30 @@ static real bot_nav_distance(
 	real z = a.z - b.z;
 
 	return square_root(x * x + y * y + z * z);
+}
+
+/* An agent's scheduler client: its bot number less one. */
+static boolean bot_nav_client(
+	struct bot_navigation_agent const *agent,
+	uint32_t *client)
+{
+	if (agent->bot_number <= 0 || agent->bot_number > BOT_NAVIGATION_AGENTS_MAX)
+		return FALSE;
+	*client = (uint32_t)(agent->bot_number - 1);
+	return TRUE;
+}
+
+/* A queued search takes the bot's new position and goal in place, keeping
+its turn; FALSE once it has begun. */
+static boolean bot_nav_refresh(
+	struct bot_navigation_agent *agent,
+	struct sn_point start,
+	struct sn_point goal)
+{
+	uint32_t client;
+
+	return bot_nav_client(agent, &client) &&
+		sn_jobs_refresh(&navigation_jobs, client, agent->search_token, start, goal);
 }
 
 /* Surface-navigation points use the ground-foot coordinate, not the pill's
@@ -517,7 +636,11 @@ static enum bot_navigation_result bot_nav_route_step(
 	resource = navigation_world_resource();
 	if (!resource)
 		return BOT_NAVIGATION_UNAVAILABLE;
-	if ((agent->searching || agent->following) &&
+	/* (a search still queued takes a moving target's new position without
+	losing its turn; one under way, or a route, replans once it is far off) */
+	if (agent->searching && bot_nav_refresh(agent, origin, goal))
+		agent->goal = goal;
+	else if ((agent->searching || agent->following) &&
 		bot_nav_distance(agent->goal, goal) > BOT_NAVIGATION_REPLAN_DISTANCE)
 	{
 		bot_navigation_agent_reset_path(agent);
@@ -542,14 +665,15 @@ project (bad-start, bad-goal), endpoints in different static components
 (disconnected), and a search refused by collision checks within one component
 (clearance: at the start or goal segment, or rejected-edges between polygons;
 static geometry and transient occupants are not distinguished). Polygon pairs
-let a log reader count distinct failures apart from retries of the same goal. */
+let a log reader count distinct failures apart from retries of the same goal.
+The points are where the search placed its endpoints, or, for one it could
+not place, where it was asked to begin or end. */
 static void bot_nav_log_failure(
 	struct bot_navigation_agent *agent,
 	struct sn_resource const *resource,
-	struct sn_point start,
-	enum sn_status status)
+	enum sn_status status,
+	struct sn_jobs_diagnostics const *query)
 {
-	struct sn_query const *query = &agent->search;
 	char const *kind = sn_status_name(status);
 
 	if (status == SN_NO_PATH)
@@ -558,64 +682,88 @@ static void bot_nav_log_failure(
 			query->goal_rejected ? "clearance-goal" : "clearance-edges";
 	platform_log("bots: bot %d surface %s search failed: %s kind %s start (%.1f %.1f %.1f) "
 		"polygon %ld component %ld goal (%.1f %.1f %.1f) polygon %ld component %ld "
-		"rejected-edges %lu", agent->bot_number, agent->patrol_goal ? "patrol" : "tactical",
-		sn_status_name(status), kind, start.x, start.y, start.z,
+		"rejected-edges %lu slices %lu", agent->bot_number, agent->patrol_goal ? "patrol" : "tactical",
+		sn_status_name(status), kind, query->start_point.x, query->start_point.y, query->start_point.z,
 		query->start == SN_NONE ? -1L : (long)query->start,
 		query->start == SN_NONE ? -1L : (long)sn_component(resource, query->start),
-		agent->goal.x, agent->goal.y, agent->goal.z,
+		query->goal_point.x, query->goal_point.y, query->goal_point.z,
 		query->goal == SN_NONE ? -1L : (long)query->goal,
 		query->goal == SN_NONE ? -1L : (long)sn_component(resource, query->goal),
-		(unsigned long)query->rejected_edges);
+		(unsigned long)query->rejected_edges, (unsigned long)query->steps);
 }
 
+/* Ask the shared scheduler for a route from start to agent->goal, or collect
+its answer. A request waits its turn for a workspace (WAITING); its route
+comes back string-pulled with the same collision checks as the search. */
 static enum bot_navigation_result bot_nav_search(
 	struct bot_navigation_agent *agent,
 	long unit_index,
 	struct sn_resource const *resource,
 	struct sn_point start)
 {
+	struct sn_jobs_request request;
+	struct sn_jobs_diagnostics diagnostics;
 	enum sn_status status;
+	uint32_t client;
+	long now = game_time_get();
 
+	if (!bot_nav_client(agent, &client))
+		return BOT_NAVIGATION_FAILED;
+	/* (asked after this tick, checked with the body the bot has now) */
+	navigation_units[client] = unit_index;
+	navigation_polled[client] = now;
+	if (agent->searching && !sn_jobs_active(&navigation_jobs, client, agent->search_token))
+	{
+		/* (dropped by a reset of the scheduler: ask again, at the back) */
+		platform_log("bots: bot %d surface %s search request lost after %ld ticks; asking again",
+			agent->bot_number, agent->patrol_goal ? "patrol" : "tactical", now - agent->search_tick);
+		agent->searching = FALSE;
+	}
 	if (!agent->searching)
 	{
-		status = sn_query_begin(&agent->search, resource, bot_nav_ground(resource, start),
-			bot_nav_ground(resource, agent->goal), BOT_NAVIGATION_ROUTE_OBSTACLES);
-		if (status != SN_RUNNING)
+		/* (one request per client: any older one of this slot's is let go) */
+		sn_jobs_cancel(&navigation_jobs, client, navigation_tokens[client]);
+		csmemset(&request, 0, sizeof(request));
+		request.start = start;
+		request.goal = agent->goal;
+		request.ground_depth = BOT_NAVIGATION_GROUND_DEPTH;
+		request.ground_horizontal = BOT_NAVIGATION_GROUND_HORIZONTAL;
+		request.obstacle_revision = BOT_NAVIGATION_ROUTE_OBSTACLES;
+		/* A tactical goal is a unit's or item's position: an enemy standing there
+		would refuse the last segment, though the route to it is open. */
+		request.check_goal_segment = agent->patrol_goal ? true : false;
+		request.straighten = true;
+		navigation_tokens[client] = ++navigation_token;
+		if (!sn_jobs_submit(&navigation_jobs, client, navigation_tokens[client], resource, &request))
 		{
-			bot_nav_log_failure(agent, resource, start, status);
+			platform_log("bots: bot %d surface %s search not queued: start (%.1f %.1f %.1f) "
+				"goal (%.1f %.1f %.1f)", agent->bot_number, agent->patrol_goal ? "patrol" : "tactical",
+				start.x, start.y, start.z, agent->goal.x, agent->goal.y, agent->goal.z);
 			bot_navigation_agent_reset_path(agent);
 			return BOT_NAVIGATION_FAILED;
 		}
-		/* A tactical goal is a unit's or item's position: an enemy standing there
-		would refuse the last segment, though the route to it is open. */
-		agent->search.check_goal_segment = agent->patrol_goal;
+		agent->search_token = navigation_tokens[client];
 		agent->searching = TRUE;
-		agent->search_tick = game_time_get();
-	}
-	status = sn_query_step(&agent->search, resource, BOT_NAVIGATION_ROUTE_OBSTACLES,
-		BOT_NAVIGATION_EXPANSIONS_PER_TICK, navigation_world_search_clear, &unit_index);
-	if (status == SN_RUNNING)
+		agent->search_tick = now;
 		return BOT_NAVIGATION_WAITING;
-	if (status == SN_FOUND)
-		status = sn_query_result(&agent->search, resource,
-			BOT_NAVIGATION_ROUTE_OBSTACLES, &agent->route);
-	/* (walk straight across each run of polygons, turning only at corners) */
-	if (status == SN_FOUND)
-		sn_route_straighten(&agent->route, resource);
+	}
+	if (sn_jobs_status(&navigation_jobs, client, agent->search_token) == SN_RUNNING)
+		return BOT_NAVIGATION_WAITING;
+	status = sn_jobs_take(&navigation_jobs, client, agent->search_token, resource,
+		BOT_NAVIGATION_ROUTE_OBSTACLES, &agent->route, &diagnostics);
+	agent->searching = FALSE; /* (finished, not abandoned) */
 	if (status != SN_FOUND)
 	{
-		bot_nav_log_failure(agent, resource, start, status);
-		agent->searching = FALSE; /* (failed, not abandoned) */
+		bot_nav_log_failure(agent, resource, status, &diagnostics);
 		bot_navigation_agent_reset_path(agent);
 		return BOT_NAVIGATION_FAILED;
 	}
 
-	agent->searching = FALSE;
 	agent->following = TRUE;
 	/* (waypoint 0 is where the bot stood when the search began) */
 	agent->waypoint = agent->route.count > 1 ? 1 : 0;
-	agent->search_tick = game_time_get() - agent->search_tick;
-	agent->progress_tick = game_time_get();
+	agent->search_tick = now - agent->search_tick;
+	agent->progress_tick = now;
 	agent->progress_position = start;
 	agent->stuck_count = 0;
 	agent->waypoint_deadline = NONE;
@@ -623,12 +771,13 @@ static enum bot_navigation_result bot_nav_search(
 	agent->jump_active = FALSE;
 	agent->jump_airborne = FALSE;
 	platform_log("bots: bot %d team %ld lane %d squad %ld surface %s route goal "
-		"(%.1f %.1f %.1f) waypoints %lu search %ld ticks", agent->bot_number, agent->team_index,
-		agent->lane_index, agent->squad_index, agent->patrol_goal ? "patrol" : "tactical",
+		"(%.1f %.1f %.1f) waypoints %lu search %ld ticks, %lu slices", agent->bot_number,
+		agent->team_index, agent->lane_index, agent->squad_index,
+		agent->patrol_goal ? "patrol" : "tactical",
 		agent->route.points[agent->route.count - 1].x,
 		agent->route.points[agent->route.count - 1].y,
 		agent->route.points[agent->route.count - 1].z, (unsigned long)agent->route.count,
-		agent->search_tick);
+		agent->search_tick, (unsigned long)diagnostics.steps);
 	return BOT_NAVIGATION_MOVING;
 }
 

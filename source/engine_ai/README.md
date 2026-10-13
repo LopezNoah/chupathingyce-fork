@@ -14,8 +14,13 @@ dependencies. Halo's existing campaign actor AI under `source/ai/` is unchanged.
 - `navigation.*`: incremental directed-graph route search, at most 256 nodes and
   2,048 links. Positive link costs, capability gates and revision-scoped routes.
 - `surface_navigation.*`: validated BSP-style convex polygon resources, height-aware
-  projection, budgeted BFS and revision-scoped portal routes. Separate from the
-  small graph, with no Halo dependencies; see [geometry navigation](../../docs/navigation.md).
+  projection, budgeted A* and revision-scoped portal routes, string pulling
+  (collision-checked with the search's callback). Separate from the small
+  graph, with no Halo dependencies; see [geometry navigation](../../docs/navigation.md).
+- `surface_navigation_jobs.*`: a fixed-memory queue of surface searches from up
+  to 32 clients over four shared A* workspaces; per tick at most four begins,
+  64 expansions and one checked string-pull, whatever the client count.
+  Requests are token-scoped; results stay in their workspace until taken.
 - `traversal.*`: route following, smart-link callbacks and reservation cleanup;
   stale graph revisions require replanning.
 - `fire_control.*`: automatic fire, tap cadence and bounded charged-shot holds,

@@ -149,6 +149,9 @@ typedef char bot_machines_clear_of_host_check[
 	BOT_MACHINE_INDEX - (BOTS_MAXIMUM - 1) / MAXIMUM_LOCAL_PLAYERS > 0 ? 1 : -1];
 typedef char bot_player_slots_check[
 	BOT_MACHINE_COUNT * MAXIMUM_LOCAL_PLAYERS >= BOTS_MAXIMUM ? 1 : -1];
+/* every bot number (slot + 1) has its own route search client */
+typedef char bot_navigation_clients_check[
+	BOTS_MAXIMUM <= BOT_NAVIGATION_AGENTS_MAX ? 1 : -1];
 
 /* the behavior tree's leaves; a leaf's utility option is its id less one */
 enum
@@ -209,6 +212,18 @@ enum
 /* a target seen a moment ago that reappears this far away has teleported */
 #define BOT_TELEPORT_DISTANCE 6.f
 #define BOT_ITEM_NEAR_DISTANCE 4.f
+/* port: friendly-fire safety (bot_attack_safe), in world units: conservative
+geometry, not projectile flight. A shot's lane widens with range, as a
+weapon's error spreads its shots; a grenade's blast is given a generous reach. */
+#define BOT_FIRE_LANE_MARGIN 0.25f /* beyond a teammate's collision pill */
+#define BOT_FIRE_LANE_SPREAD 0.035f /* more per unit of range, at least: about 2 degrees */
+/* the widest shot cone a weapon's tags may claim (radians) */
+#define BOT_FIRE_LANE_MAXIMUM_ERROR 0.5f
+#define BOT_GRENADE_SAFETY_RADIUS 6.f
+/* a thrown grenade's flight and fuse, for where teammates will be when it goes off */
+#define BOT_GRENADE_FUSE_TICKS (2 * TICKS_PER_SECOND)
+/* faster than any unit runs or drives, per tick: a velocity beyond it is not trusted */
+#define BOT_MAXIMUM_SPEED_PER_TICK 2.f
 
 /* ---------- structures */
 
@@ -348,6 +363,9 @@ struct bot
 	boolean charging;
 	long charge_target_index;
 	long next_charge_time;
+	/* port: the friendly-fire gates' work since the last status line */
+	long fire_held_ticks;
+	long throws_refused;
 	long retreat_start_time;
 	long retreat_cooldown_time;
 	boolean moved_last_tick;
@@ -536,6 +554,8 @@ void bots_initialize_for_new_map(
 
 	csmemset(&bots_globals.bots, 0, sizeof(bots_globals.bots));
 	csmemset(&bots_globals.navigation, 0, sizeof(bots_globals.navigation));
+	/* (the old map's bots' searches go with them) */
+	bot_navigation_reset_all();
 	bots_globals.had_bots = FALSE;
 	bots_globals.sandbox_done = FALSE;
 	bots_globals.log_decisions = config_boolean("debug.bot_decisions") != 0;
@@ -588,6 +608,9 @@ void bots_update(
 	}
 	bots_join();
 	bot_manager_update();
+	/* (the shared route searches advance before the bots decide, so that a
+	route found this tick is followed this tick) */
+	bot_navigation_update();
 	for (bot_index = 0; bot_index < BOTS_MAXIMUM; bot_index++)
 	{
 		if (bots_globals.bots[bot_index].active)
@@ -1278,11 +1301,14 @@ static void bot_engage(
 	struct engine_ai_behavior_intent_emitter *emitter)
 {
 	struct bot_skill const *skill = bots_globals.skill;
+	struct unit_datum const *unit = bot_living_unit(bot->unit_index);
 	long now = game_time_get();
 	real_euler_angles2d aim = bot_angles_to(eye, &bot->target_last_position);
 	real distance = distance3d(eye, &bot->target_last_position);
 	real offset;
 
+	if (!unit)
+		return;
 	if (now >= bot->aim_error_time)
 	{
 		struct engine_ai_aim_skill aim_skill;
@@ -1321,7 +1347,7 @@ static void bot_engage(
 			bot_random_range(bot, 0.5f, 1.f) * skill->burst_seconds :
 			bot_random_range(bot, 0.5f, 1.f) * skill->burst_pause_seconds);
 	}
-	if (bot_living_unit(bot->unit_index)->object.parent_object_index == NONE &&
+	if (unit->object.parent_object_index == NONE &&
 		distance < 1.5f && now >= bot->melee_time)
 	{
 		bot->melee_time = now + bot_seconds_to_ticks(1.f);
@@ -1329,7 +1355,7 @@ static void bot_engage(
 	}
 	else if (skill->burst_seconds <= 0.f || bot->burst_firing)
 		bot_emit_fire(emitter, 1.f);
-	if (bot_living_unit(bot->unit_index)->object.parent_object_index == NONE &&
+	if (unit->object.parent_object_index == NONE &&
 		skill->throws_grenades && now >= bot->grenade_time && distance > 8.f && distance < 20.f)
 	{
 		bot->grenade_time = now + bot_seconds_to_ticks(BOT_GRENADE_COOLDOWN_SECONDS * bot_random_range(bot, 1.f, 2.f));
@@ -2431,18 +2457,20 @@ static real bot_confidence(
 	struct unit_datum const *unit)
 {
 	struct bot_utility_tuning const *tuning = bots_globals.tuning;
-	struct player_datum *target = bot->target_player_index != NONE ?
+	/* port: remembered/shared contacts carry no live health or weapon data. */
+	struct player_datum *target = bot->target_visible && bot->target_player_index != NONE ?
 		player_try_and_get(bot->target_player_index) : NULL;
 	struct unit_datum *target_unit = target ? bot_living_unit(target->unit_index) : NULL;
 	float inputs[4];
 	real own_weapon = bot_unit_weapon_utility(unit);
-	real enemies = (real)MAX(bot->visible_enemy_count, target_unit ? 1 : 0);
+	real target_weapon = target_unit ? bot_unit_weapon_utility(target_unit) : 0.f;
+	real enemies = (real)MAX(bot->visible_enemy_count, bot->target_player_index != NONE ? 1 : 0);
 	real teammates = 0.f;
 
 	inputs[0] = bot_unit_vitality(unit);
 	inputs[1] = target_unit ? 1.f - bot_unit_vitality(target_unit) : 0.5f;
-	if (target_unit && own_weapon + bot_unit_weapon_utility(target_unit) > 0.f)
-		inputs[2] = own_weapon / (own_weapon + bot_unit_weapon_utility(target_unit));
+	if (target_unit && own_weapon + target_weapon > 0.f)
+		inputs[2] = own_weapon / (own_weapon + target_weapon);
 	else
 		inputs[2] = own_weapon > 0.f ? 0.5f : 0.f;
 	if (game_engine_has_teams())
@@ -2723,6 +2751,302 @@ static struct engine_ai_intent_result bot_execute_intent(
 	return result;
 }
 
+/* port: whether `point` lies within `radius` of the lane from start to end,
+the radius growing by `spread` per unit of the lane's length. A point behind
+start is not in it (shots leave forward); a lane of no length is the sphere
+about start. Non-finite input fails closed (TRUE). Double intermediates keep
+the products of finite float coordinates in range. */
+static boolean bot_lane_near(
+	real_point3d const *start,
+	real_point3d const *end,
+	real_point3d const *point,
+	real radius,
+	real spread)
+{
+	double dx;
+	double dy;
+	double dz;
+	double px;
+	double py;
+	double pz;
+	double length_squared;
+	double along = 0.0;
+	double allowed;
+
+	if (!start || !end || !point || !valid_real(radius) || radius < 0.f ||
+		!valid_real(spread) || spread < 0.f ||
+		!valid_real(start->x) || !valid_real(start->y) || !valid_real(start->z) ||
+		!valid_real(end->x) || !valid_real(end->y) || !valid_real(end->z) ||
+		!valid_real(point->x) || !valid_real(point->y) || !valid_real(point->z))
+		return TRUE;
+	dx = (double)end->x - start->x;
+	dy = (double)end->y - start->y;
+	dz = (double)end->z - start->z;
+	px = (double)point->x - start->x;
+	py = (double)point->y - start->y;
+	pz = (double)point->z - start->z;
+	length_squared = dx * dx + dy * dy + dz * dz;
+	if (length_squared > 0.0)
+	{
+		/* (the fraction of the lane at the point's foot) */
+		along = (px * dx + py * dy + pz * dz) / length_squared;
+		if (along < 0.0)
+			return FALSE;
+		along = MIN(along, 1.0);
+		px -= along * dx;
+		py -= along * dy;
+		pz -= along * dz;
+	}
+	allowed = (double)radius + (double)spread * along * sqrt(length_squared);
+	return px * px + py * py + pz * pz <= allowed * allowed;
+}
+
+/* port: whether a teammate's body touches the lane: its collision pill,
+sampled at the pill's lower, middle and upper sphere centers (less than a
+radius apart), each widened by the margin; any other unit, its bounding
+sphere. */
+static boolean bot_lane_near_unit(
+	real_point3d const *start,
+	real_point3d const *end,
+	long unit_index,
+	struct unit_datum const *unit,
+	real margin,
+	real spread)
+{
+	real_point3d base;
+	real height;
+	real radius;
+	short sample;
+
+	if (unit->object.type != _object_type_biped)
+		return bot_lane_near(start, end, &unit->object.bounding_sphere_center,
+			unit->object.bounding_sphere_radius + margin, spread);
+	biped_get_physics_pill(unit_index, &base, &height, &radius);
+	if (!valid_real(height) || height < 0.f || height > 10.f)
+		return TRUE;
+	for (sample = 0; sample < 3; sample++)
+	{
+		real_point3d point = base;
+
+		point.z += height * 0.5f * (real)sample;
+		if (bot_lane_near(start, end, &point, radius + margin, spread))
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* port: whether a grenade going off at `aim` or `target` would reach a unit,
+where it is now or anywhere on its way to where its present velocity (its
+vehicle's, riding) takes it within the fuse: a teammate running to the fight
+meets the blast there. Its bounding sphere, widened by the blast radius. A
+missing or implausible velocity fails closed (TRUE). */
+static boolean bot_blast_reaches(
+	real_point3d const *aim,
+	real_point3d const *target,
+	long unit_index,
+	struct unit_datum const *unit)
+{
+	real_point3d const *center = &unit->object.bounding_sphere_center;
+	real radius = unit->object.bounding_sphere_radius + BOT_GRENADE_SAFETY_RADIUS;
+	struct object_datum const *mover = object_try_and_get(unit->object.parent_object_index != NONE ?
+		object_get_ultimate_parent(unit_index) : unit_index);
+	real_vector3d velocity;
+	real_point3d later;
+
+	if (!mover)
+		return TRUE;
+	velocity = mover->object.translational_velocity;
+	if (!valid_real(velocity.i) || !valid_real(velocity.j) || !valid_real(velocity.k) ||
+		(real)fabs(velocity.i) > BOT_MAXIMUM_SPEED_PER_TICK ||
+		(real)fabs(velocity.j) > BOT_MAXIMUM_SPEED_PER_TICK ||
+		(real)fabs(velocity.k) > BOT_MAXIMUM_SPEED_PER_TICK)
+		return TRUE;
+	later.x = center->x + velocity.i * BOT_GRENADE_FUSE_TICKS;
+	later.y = center->y + velocity.j * BOT_GRENADE_FUSE_TICKS;
+	later.z = center->z + velocity.k * BOT_GRENADE_FUSE_TICKS;
+	/* (now; then on its way, a burst behind it being nearest now) */
+	return bot_lane_near(aim, aim, center, radius, 0.f) ||
+		bot_lane_near(target, target, center, radius, 0.f) ||
+		bot_lane_near(center, &later, aim, radius, 0.f) ||
+		bot_lane_near(center, &later, target, radius, 0.f);
+}
+
+/* port: how far a trigger's shots stray from the aim, per unit of range: the
+tangent of the widest cone its projectiles leave in (the upper error bound
+that sustained fire ramps to, or the inner cone if wider, plus the pellets'
+distribution: weapon_trigger_fire), never less than BOT_FIRE_LANE_SPREAD. The
+angles are a map's tags: a value that is not finite and positive counts as
+none, and the sum is held to BOT_FIRE_LANE_MAXIMUM_ERROR. */
+static real bot_trigger_spread(
+	struct weapon_trigger_definition const *trigger)
+{
+	real error = 0.f;
+	real distribution = 0.f;
+	real angle;
+
+	if (valid_real(trigger->projectile_error_angle_upper_bound) && trigger->projectile_error_angle_upper_bound > 0.f)
+		error = trigger->projectile_error_angle_upper_bound;
+	if (valid_real(trigger->projectile_error_angle_lower_bound) && trigger->projectile_error_angle_lower_bound > error)
+		error = trigger->projectile_error_angle_lower_bound;
+	if (valid_real(trigger->projectile_error_inner_cone_angle) && trigger->projectile_error_inner_cone_angle > error)
+		error = trigger->projectile_error_inner_cone_angle;
+	if (valid_real(trigger->projectile_distribution_angle) && trigger->projectile_distribution_angle > 0.f)
+		distribution = trigger->projectile_distribution_angle;
+	angle = MIN(MIN(error, BOT_FIRE_LANE_MAXIMUM_ERROR) + MIN(distribution, BOT_FIRE_LANE_MAXIMUM_ERROR),
+		BOT_FIRE_LANE_MAXIMUM_ERROR);
+	return MAX(BOT_FIRE_LANE_SPREAD, sine(angle) / cosine(angle));
+}
+
+/* port: friendly-fire safety for the attack this tick's action would make,
+along the facing actually submitted (after turn speed and aim error), not the
+direction to the enemy. A shot's lane runs the skill's fire range and widens
+with it by `spread` per unit (bot_trigger_spread: the weapon's own cone); a
+teammate in it holds fire, except one riding in the bot's own
+vehicle, which its shots pass (a projectile ignores its owner's ultimate
+parent: projectiles.c). A grenade is also refused when the bot is within its
+blast radius of where it is aimed or of the target, when a teammate is or
+will be within it before the fuse runs out (bot_blast_reaches), or when a
+surface stands within that radius in front of the bot. Conservative geometry,
+not projectile flight: no ricochets, blast tags, homing, or turns a teammate
+has yet to make. At most every player once (the player table's capacity,
+checked). */
+static boolean bot_attack_safe(
+	struct bot *bot,
+	boolean grenade,
+	real spread)
+{
+	struct player_datum const *player = bot_player(bot);
+	struct unit_datum const *unit = bot_living_unit(bot->unit_index);
+	struct data_iterator iterator;
+	real_point3d eye;
+	real_point3d end;
+	real_vector3d direction;
+	real range;
+	real reach;
+	long vehicle_index = NONE;
+	short examined;
+
+	if (!player || !unit || !valid_real(bot->facing.yaw) || !valid_real(bot->facing.pitch) ||
+		!valid_real(spread) || spread < 0.f)
+		return FALSE;
+	if (!grenade && !game_engine_has_teams())
+		return TRUE;
+	unit_get_camera_position(bot->unit_index, &eye);
+	range = grenade ? distance3d(&eye, &bot->target_last_position) : bots_globals.skill->fire_range;
+	if (!valid_real(range) || range <= 0.f || range > 1000.f)
+		return FALSE;
+	direction.i = cosine(bot->facing.pitch) * cosine(bot->facing.yaw);
+	direction.j = cosine(bot->facing.pitch) * sine(bot->facing.yaw);
+	direction.k = sine(bot->facing.pitch);
+	end.x = eye.x + direction.i * range;
+	end.y = eye.y + direction.j * range;
+	end.z = eye.z + direction.k * range;
+	if (grenade)
+	{
+		real_point3d ahead;
+
+		/* (its own blast, where it aims and where the target is) */
+		if (bot_lane_near(&end, &end, &unit->object.bounding_sphere_center,
+			unit->object.bounding_sphere_radius + BOT_GRENADE_SAFETY_RADIUS, 0.f) ||
+			bot_lane_near(&bot->target_last_position, &bot->target_last_position,
+			&unit->object.bounding_sphere_center,
+			unit->object.bounding_sphere_radius + BOT_GRENADE_SAFETY_RADIUS, 0.f))
+			return FALSE;
+		/* (a wall, rock or vehicle in its face would throw it back) */
+		reach = MIN(range, BOT_GRENADE_SAFETY_RADIUS);
+		ahead.x = eye.x + direction.i * reach;
+		ahead.y = eye.y + direction.j * reach;
+		ahead.z = eye.z + direction.k * reach;
+		if (!bot_line_clear(_collision_test_for_line_of_sight_flags, &eye, &ahead, bot->unit_index))
+			return FALSE;
+	}
+	if (!game_engine_has_teams())
+		return TRUE;
+	if (unit->object.parent_object_index != NONE)
+		vehicle_index = object_get_ultimate_parent(bot->unit_index);
+	data_iterator_new(&iterator, player_data);
+	for (examined = 0; examined <= HALO_PORT_MAXIMUM_NETWORK_PLAYERS; examined++)
+	{
+		struct player_datum const *other = (struct player_datum *)data_iterator_next(&iterator);
+		struct unit_datum const *other_unit;
+
+		if (!other)
+			return TRUE;
+		if (iterator.datum_index == bot->player_index || other->team_index != player->team_index)
+			continue;
+		other_unit = bot_living_unit(other->unit_index);
+		if (!other_unit)
+			continue;
+		if (grenade)
+		{
+			if (bot_blast_reaches(&end, &bot->target_last_position, other->unit_index, other_unit))
+				return FALSE;
+		}
+		else if (vehicle_index != NONE && other_unit->object.parent_object_index != NONE &&
+			object_get_ultimate_parent(other->unit_index) == vehicle_index)
+		{
+			continue;
+		}
+		if (bot_lane_near_unit(&eye, &end, other->unit_index, other_unit,
+			BOT_FIRE_LANE_MARGIN, spread))
+			return FALSE;
+	}
+	/* (more players than the table holds: not shown to be safe) */
+	return FALSE;
+}
+
+/* port: a refused throw never reaches the player action; it is tried again
+in a second rather than after the whole cooldown. */
+static void bot_control_grenade(struct bot *bot, struct player_action *action)
+{
+	long retry;
+
+	if (!TEST_FLAG(action->control_flags, _unit_control_throw_grenade_bit) ||
+		bot_attack_safe(bot, TRUE, BOT_FIRE_LANE_SPREAD))
+		return;
+	action->control_flags &= ~FLAG(_unit_control_throw_grenade_bit);
+	retry = game_time_get() + bot_seconds_to_ticks(1.f);
+	bot->grenade_time = MIN(bot->grenade_time, retry);
+	bot->throws_refused++;
+}
+
+/* port: the other of a player's two weapon slots; NONE for any other slot. */
+static short bot_other_weapon_slot(short slot)
+{
+	return slot == 0 ? 1 : slot == 1 ? 0 : NONE;
+}
+
+/* port: the trigger while a teammate is in the firing lane. A charging or
+charged trigger is held, as letting go of it fires; a swap to the other
+weapon, where there is one, then puts the weapon away at once (unit_update),
+which drops the charge unfired. Should the lane clear first, the hold ends
+and the charge goes at the enemy. Any other trigger is let go. */
+static void bot_hold_fire(
+	struct bot *bot,
+	struct player_action *action,
+	struct unit_datum const *unit,
+	short slot,
+	boolean holding_charge)
+{
+	short other = bot_other_weapon_slot(slot);
+
+	bot->fire_held_ticks++;
+	if (!holding_charge)
+	{
+		bot->fire_control.pressed = FALSE;
+		bot->charging = FALSE;
+		bot->pending.trigger = 0.f;
+		return;
+	}
+	action->primary_trigger = 1.f;
+	action->control_flags |= FLAG(_unit_control_weapon_primary_trigger_bit);
+	bot->fire_control.pressed = TRUE;
+	bot->fire_control.release_tick = game_time_get();
+	if (unit->object.type != _object_type_vehicle && other != NONE &&
+		weapon_try_and_get(unit->unit.weapon_object_indices[other]))
+		action->desired_weapon_index = other;
+}
+
 /* Charged shots are deliberate: a visible, shielded opponent at medium
    range, no more than once every few seconds. Continue aiming through burst
    pauses, but release if the target changes or disappears. */
@@ -2809,9 +3133,10 @@ static void bot_control_weapon(struct bot *bot, struct player_action *action)
 	weapon_index = unit->unit.weapon_object_indices[slot];
 	if (weapon_index == NONE)
 		return;
-	if (unit->object.type != _object_type_vehicle && !bot->charging)
+	if (unit->object.type != _object_type_vehicle && !bot->charging && !bot->fire_control.pressed &&
+		bot_other_weapon_slot(slot) != NONE)
 	{
-		short other = 1 - slot;
+		short other = bot_other_weapon_slot(slot);
 		long other_weapon = unit->unit.weapon_object_indices[other];
 
 		if (other_weapon != NONE && bot_weapon_utility(other_weapon) > bot_weapon_utility(weapon_index) * 1.35f)
@@ -2827,7 +3152,9 @@ static void bot_control_weapon(struct bot *bot, struct player_action *action)
 		bot->charging = FALSE;
 		return; /* Release before using the new weapon. */
 	}
-	weapon = weapon_get(weapon_index);
+	weapon = weapon_try_and_get(weapon_index);
+	if (!weapon)
+		return;
 	definition = weapon_definition_get(weapon->definition_index);
 	if (definition->weapon.triggers.count <= 0)
 		return;
@@ -2842,10 +3169,20 @@ static void bot_control_weapon(struct bot *bot, struct player_action *action)
 		{
 			if (magazine->rounds_total > 0)
 				action->control_flags |= FLAG(_unit_control_weapon_reload_bit);
-			else if (unit->unit.weapon_object_indices[1 - slot] != NONE)
-				action->desired_weapon_index = 1 - slot;
+			else if (bot_other_weapon_slot(slot) != NONE &&
+				unit->unit.weapon_object_indices[bot_other_weapon_slot(slot)] != NONE)
+				action->desired_weapon_index = bot_other_weapon_slot(slot);
 			bot->pending.trigger = 0.f;
 		}
+	}
+	/* port: never fire through a teammate (bot_attack_safe). Custom tags whose
+	charge discharges while held are outside this policy. */
+	if ((bot->pending.trigger > 0.f || bot->fire_control.pressed || bot->charging) &&
+		!bot_attack_safe(bot, FALSE, bot_trigger_spread(trigger)))
+	{
+		bot_hold_fire(bot, action, unit, slot, trigger->charging_time > 0.f &&
+			(bot->fire_control.pressed || weapon_overcharged(weapon_index)));
+		return;
 	}
 	if (bot_weapon_fire(bot, trigger))
 	{
@@ -2867,6 +3204,14 @@ static void bot_keep_moving(
 	if (!unit || unit->object.parent_object_index != NONE)
 		return;
 	object_get_origin(bot->unit_index, &origin);
+	/* port: queued/shared searches are deliberate waits, not movement stalls. */
+	if (bot->navigation_agent.searching)
+	{
+		bot->movement_check_time = now;
+		bot->movement_position = origin;
+		bot->movement_escape_until = now;
+		return;
+	}
 	if (bot->movement_check_time == NONE)
 	{
 		bot->movement_check_time = now;
@@ -3028,6 +3373,7 @@ static void bot_submit_action(
 	action.desired_weapon_index = NONE;
 	action.desired_grenade_index = NONE;
 	action.desired_zoom_level = NONE;
+	bot_control_grenade(bot, &action);
 	bot_control_weapon(bot, &action);
 	update_server_set_player_action(bot->player_index, &action);
 }
@@ -3361,12 +3707,17 @@ static void bot_think(
 			bot_behavior_nodes[bot->behavior.running_node].leaf_id : 0;
 
 		object_get_origin(bot->unit_index, &origin);
-		platform_log("bots: bot %d at (%.1f %.1f %.1f) yaw %.0f %s (conf %.2f), target %ld%s, shield %.2f, kills %d deaths %d",
+		platform_log("bots: bot %d at (%.1f %.1f %.1f) yaw %.0f %s (conf %.2f), target %ld%s, shield %.2f, kills %d deaths %d"
+			", betrayals %d, held fire %ld ticks, refused %ld throws",
 			bot->slot + 1, origin.x, origin.y, origin.z, RADIANS_TO_DEGREES(bot->facing.yaw),
 			bot_leaf_names[leaf < NUMBEROF(bot_leaf_names) ? leaf : 0], bot->confidence,
 			(long)(bot->target_player_index == NONE ? -1 : DATUM_INDEX_TO_ABSOLUTE_INDEX(bot->target_player_index)),
 			bot->target_visible ? " (seen)" : "", unit->object.shield_vitality,
-			player->statistics.kills[0], player->statistics.deaths);
+			player->statistics.kills[0], player->statistics.deaths,
+			player->statistics.friendly_fire_kills, bot->fire_held_ticks, bot->throws_refused);
+		/* (the friendly-fire gates' counts are per line) */
+		bot->fire_held_ticks = 0;
+		bot->throws_refused = 0;
 	}
 }
 
@@ -3672,6 +4023,7 @@ static void bots_controller_update(
 static void bots_navigation_reset(
 	void)
 {
+	bot_navigation_reset_all();
 	navigation_world_reset();
 	map_anchors_reset();
 }

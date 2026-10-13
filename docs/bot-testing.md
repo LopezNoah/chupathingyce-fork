@@ -17,6 +17,7 @@ python3 tools/test_bot_movement_log.py
 python3 tools/test_bot_validation_runner.py
 python3 tools/test_bot_awareness_log.py
 python3 tools/test_bot_perception_steering.py --sanitize
+python3 tools/test_bot_fire_safety.py --sanitize
 python3 tools/test_human_callouts.py --sanitize
 cc -std=c99 -Wall -Wextra -Werror -fsanitize=address,undefined \
   tools/test_engine_ai_fire_control.c source/engine_ai/fire_control.c \
@@ -55,6 +56,25 @@ file supplies only fixtures/stubs). It checks:
 There is no sneaking behavior. A future stealth behavior may choose a different
 clearance preference, but must not bypass collision safety. These tests verify
 policy and integration ordering, not the game's actual BSP collision routines.
+
+### Friendly-fire gates
+
+`test_bot_fire_safety.py` compiles the real lane, grenade and trigger
+functions from `bots.c` against a fake world. It checks that a teammate on or
+near the firing lane holds fire (the margin widening with range, and with the
+weapon's tag cone: a precise weapon fires past a teammate a unit off the line
+at ten units, one with a 0.1-radian cone holds) while an enemy, a dead
+teammate, or one behind, beside, above or past the fire range does not; that
+hostile tag angles (NaN, negative, infinite, huge) are ignored or capped; that
+riders in the bot's own vehicle do not block it and riders in another do; that
+a full player table, a missing body or player, a non-finite facing, range or
+spread fail closed; that throws are refused for a teammate near the target or
+the aim point, or running (or driven) into the blast within the fuse, for the
+bot's own blast, a surface in its face and a teammate in the throwing lane,
+and retried in a second; that a held or overcharged trigger stays held with a
+swap to the other slot (none for a vehicle's weapon, a missing weapon or a
+third slot); that a blocked lane still lets an empty magazine reload; and the
+gates' counts. It does not fire real projectiles.
 
 ## Implicit human callouts (Team Slayer)
 
@@ -456,6 +476,49 @@ explicitly checks that route-search and occupant waits do not emit escape moves.
 The 28 movement/awareness/runner unit tests pass. `ninja macos` passes; this
 configured tree still has no `android` target. Runs still need the owned-process
 watchdog; timed shutdown remains unresolved. All map-derived dumps stay local.
+
+## Shared route searches and checked string pulling (2026-10-12)
+
+Route searches queue for four shared workspaces instead of one A* query per
+bot (9.8 MB for 31 bots, now 1.27 MB in all), and found routes are
+string-pulled with the search's collision checks so that a shortcut no longer
+cuts through scenery the searched path avoided ([navigation.md](navigation.md),
+"Routes" and "Scheduling"). Route lines now end `search N ticks, M slices`:
+the ticks include the wait for a workspace, the slices are the search itself.
+The 10-second status lines end `betrayals B, held fire H ticks, refused R
+throws`, the last two counted since the bot's previous line.
+
+Blood Gulch, 24 bots, 100 s wall (`run_bot_validation.py`, directories under
+`build/macos/botrun/validation/`):
+
+| Run | Routes | Arrived | Failed | Median waypoints | Worst wait at start |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Patrol-only, 4 x 16 expansions (`T143104`) | 126 | 65 | 0 | 9 | 284 ticks |
+| Patrol-only, 4 x 32, experiment only (`T143335`) | 137 | 83 | 0 | 9 | 109 ticks |
+
+Pulled routes stay as short as the unchecked pull's (about 10 points; the
+searched routes have about 73), and a search takes the same ~16 slices as
+before. The cost is queueing: when all 24 ask at once at the start, the last
+waits about 9.5 s with 64 expansions per tick, 3.6 s with 128. The shipped
+constants are 4 x 16; 32 per workspace (same memory) is one line in
+`surface_navigation_jobs.h`. Search sweeps rose from about 100 to several
+hundred per 10 s (about 9,400 in the first 10 s): the string-pull's capsule
+sweeps, at most 256 per tick. Frame time was not measured.
+
+Friendly fire, combat (Team Slayer, betrayals = the players' friendly-fire
+kills in the network-test lines; "riding" when the betrayer was in a vehicle):
+
+| Runs | Kills | Betrayals on foot | Riding |
+| --- | ---: | ---: | ---: |
+| 7 earlier runs, no gates (2026-10-11/12) | 19–47 each | 0–3 each, 10 in all | 2 in all |
+| Gates, first version (`T143631`) | 21 | 1 | 4 |
+| + fuse-aware blast (`T144246`) | 30 | 1 | 0 |
+| + weapon-cone lane (`T144652`) | 31 | 0 | 2 |
+
+In the last run the gates held fire for 2,035 bot-ticks (65 of 202 status
+windows) and refused 52 throws; kills stayed in the earlier range. One run
+each is not a measured reduction. The riding betrayals were drivers running
+teammates over (bot 10, seat 0, in `T143631`): driving is not covered.
 
 ## Still unresolved
 

@@ -168,6 +168,18 @@ static uint32_t component_root(uint32_t *parent, uint32_t row)
     while (parent[row]!=row) { parent[row]=parent[parent[row]]; row=parent[row]; }
     return row;
 }
+/* Whether the straight line a-b across polygon row keeps the agent's radius
+   from every edge with no neighbor (horizontally; at most 8 edges). */
+static bool narrow_clear(const struct sn_resource *r, uint32_t row, struct sn_point a, struct sn_point b)
+{
+    const struct sn_polygon *p=&r->polygons[row];
+    uint32_t e;
+    for (e=0; e<p->vertex_count; e++)
+        if (p->neighbors[e]==SN_NONE &&
+            segment_distance(a,b,p->vertices[e],p->vertices[(e+1)%p->vertex_count])<r->agent.radius-0.0001f)
+            return false;
+    return true;
+}
 /* A polygon too narrow to stand in (a seam between two floors, a sliver
    under a door frame) can still be crossed from one shared edge to another:
    the straight line between the two portals' midpoints must keep the agent's
@@ -176,17 +188,10 @@ static uint32_t component_root(uint32_t *parent, uint32_t row)
 static bool crossing(const struct sn_resource *r, uint32_t row, uint32_t in, uint32_t out)
 {
     const struct sn_polygon *p=&r->polygons[row];
-    struct sn_point a,b;
-    uint32_t e;
     if (in==out || p->neighbors[in]==SN_NONE || p->neighbors[out]==SN_NONE ||
         p->neighbors[in]==p->neighbors[out]) return false;
-    a=midpoint(p->vertices[in],p->vertices[(in+1)%p->vertex_count]);
-    b=midpoint(p->vertices[out],p->vertices[(out+1)%p->vertex_count]);
-    for (e=0; e<p->vertex_count; e++)
-        if (p->neighbors[e]==SN_NONE &&
-            segment_distance(a,b,p->vertices[e],p->vertices[(e+1)%p->vertex_count])<r->agent.radius-0.0001f)
-            return false;
-    return true;
+    return narrow_clear(r,row,midpoint(p->vertices[in],p->vertices[(in+1)%p->vertex_count]),
+        midpoint(p->vertices[out],p->vertices[(out+1)%p->vertex_count]));
 }
 static void join(uint32_t *parent, uint32_t x, uint32_t y)
 {
@@ -606,35 +611,69 @@ static bool portal_ends(const struct sn_route *route, const struct sn_resource *
     }
     return true;
 }
+/* port: Validate the public route before following any of its array indices.
+   All scans are bounded by the route's fixed polygon/waypoint capacities. */
+static bool valid_route(const struct sn_route *route, const struct sn_resource *r)
+{
+    uint32_t i;
+    if (!sn_route_current(route,r,route->obstacle_revision) || route->count<2 ||
+        route->count>SN_WAYPOINTS_MAX || !route->corridor_count ||
+        route->corridor_count>SN_ROUTE_POLYGONS_MAX) return false;
+    for (i=0; i<route->corridor_count; i++)
+        if (route->corridor[i]>=r->polygon_count) return false;
+    for (i=0; i<route->count; i++)
+        if (!finite_point(route->points[i]) || route->corridor_index[i]>=route->corridor_count ||
+            route->polygons[i]!=route->corridor[route->corridor_index[i]] ||
+            (i && route->corridor_index[i]<route->corridor_index[i-1])) return false;
+    return route->corridor_index[0]==0 &&
+        route->corridor_index[route->count-1]==route->corridor_count-1;
+}
+/* port: String-pulling scratch, shared by both straighteners (one simulation
+   thread; neither is reentrant): each portal's inset ends, the route being
+   built, and the checked straightener's pending spans. All the funnels of
+   one checked straightening together run at most SN_STRAIGHTEN_WORK_MAX steps. */
+enum { SN_STRAIGHTEN_SPANS_MAX = 32, SN_STRAIGHTEN_WORK_MAX = 16*SN_ROUTE_POLYGONS_MAX };
+static struct {
+    struct sn_point left[SN_ROUTE_POLYGONS_MAX], right[SN_ROUTE_POLYGONS_MAX];
+    struct sn_route out; /* (20 KB; not on the caller's stack) */
+    uint32_t span_from[SN_STRAIGHTEN_SPANS_MAX], span_to[SN_STRAIGHTEN_SPANS_MAX];
+} pull;
+/* Every portal's ends before any is used: an inconsistent corridor stays
+   unsmoothed. */
+static bool funnel_portals(const struct sn_route *route, const struct sn_resource *r)
+{
+    uint32_t i;
+    for (i=1; i<route->corridor_count; i++)
+        if (!portal_ends(route,r,i,&pull.left[i],&pull.right[i])) return false;
+    return true;
+}
 /* Simple stupid funnel (Mononen): advance the left and right sides of a
    funnel from the apex through the portals; when one side would cross the
    other, its far end becomes a corner (the new apex) and the walk restarts
-   from there. Portal 0 is the start point, the last the goal point. */
-void sn_route_straighten(struct sn_route *route, const struct sn_resource *r)
+   from there. Here from `start` in corridor polygon `first` through portals
+   first+1..last to `goal` in polygon `last`, appending the corners and the
+   goal to pull.out (`start` is already its last point). False when *work
+   reaches work_max or a corner would not fit; pull.out then holds a partial
+   span for the caller to discard. */
+static bool funnel(const struct sn_route *route, uint32_t first, uint32_t last,
+    struct sn_point start, struct sn_point goal, uint32_t *work, uint32_t work_max)
 {
-    struct sn_point start,goal,apex,left,right,l,q;
-    uint32_t steps,i,apex_step=0,left_step=0,right_step=0,guard=0;
-    static struct sn_route out; /* (20 KB; not on the caller's stack) */
-    assert(route && r);
-    if (route->count<2 || route->corridor_count<2) return;
-    steps=route->corridor_count;
-    start=route->points[0]; goal=route->points[route->count-1];
-    /* validate every portal first; an inconsistent corridor stays unsmoothed */
-    for (i=1; i<steps; i++) if (!portal_ends(route,r,i,&l,&q)) return;
-    out=*route; out.count=0;
-    append(&out,start,route->corridor[0],0);
-    apex=left=right=start;
-    for (i=1; i<=steps && guard++<4*SN_ROUTE_POLYGONS_MAX*SN_ROUTE_POLYGONS_MAX; i++) {
-        if (i<steps) portal_ends(route,r,i,&l,&q);
+    struct sn_route *out=&pull.out;
+    struct sn_point apex=start,left=start,right=start,l,q;
+    uint32_t i,apex_step=first,left_step=first,right_step=first,base=out->count;
+    for (i=first+1; i<=last+1; i++) {
+        if (*work>=work_max) return false;
+        (*work)++;
+        if (i<=last) { l=pull.left[i]; q=pull.right[i]; }
         else l=q=goal;
         /* the right side narrows toward q */
         if (turn(apex,right,q)>=0.f) {
             if (same_point(apex,right) || turn(apex,left,q)<0.f) { right=q; right_step=i; }
             else {
                 /* (a corner beyond capacity: keep the original route) */
-                if (out.count>=SN_WAYPOINTS_MAX-1) return;
-                append(&out,left,route->corridor[left_step<steps ? left_step : steps-1],
-                    left_step<steps ? left_step : steps-1);
+                if (out->count>=SN_WAYPOINTS_MAX-1) return false;
+                append(out,left,route->corridor[left_step<=last ? left_step : last],
+                    left_step<=last ? left_step : last);
                 apex=right=left; apex_step=right_step=left_step;
                 i=apex_step; continue;
             }
@@ -643,19 +682,172 @@ void sn_route_straighten(struct sn_route *route, const struct sn_resource *r)
         if (turn(apex,left,l)<=0.f) {
             if (same_point(apex,left) || turn(apex,right,l)>0.f) { left=l; left_step=i; }
             else {
-                if (out.count>=SN_WAYPOINTS_MAX-1) return;
-                append(&out,right,route->corridor[right_step<steps ? right_step : steps-1],
-                    right_step<steps ? right_step : steps-1);
+                if (out->count>=SN_WAYPOINTS_MAX-1) return false;
+                append(out,right,route->corridor[right_step<=last ? right_step : last],
+                    right_step<=last ? right_step : last);
                 apex=left=right; apex_step=left_step=right_step;
                 i=apex_step; continue;
             }
         }
     }
     /* (the last corner may already be the goal) */
-    if (i<=steps) return; /* Budget exhausted: keep the original complete route. */
-    if (out.count>1 && same_point(out.points[out.count-1],goal)) out.count--;
-    if (out.count<SN_WAYPOINTS_MAX) append(&out,goal,route->corridor[steps-1],steps-1);
-    *route=out;
+    if (out->count>base && same_point(out->points[out->count-1],goal)) out->count--;
+    if (out->count>=SN_WAYPOINTS_MAX) return false;
+    append(out,goal,route->corridor[last],last);
+    return true;
+}
+/* port: Intersect a horizontal shortcut with the next shared edge. Parallel,
+   backwards or out-of-edge crossings conservatively retain the original path. */
+static bool shortcut_portal(const struct sn_route *route, const struct sn_resource *r,
+    uint32_t step, struct sn_point from, struct sn_point to, float *progress,
+    struct sn_point *crossing_point)
+{
+    const struct sn_polygon *p=&r->polygons[route->corridor[step-1]];
+    struct sn_point a,b;
+    float dx=to.x-from.x,dy=to.y-from.y,ex,ey,denominator,t,u;
+    uint32_t e;
+    for (e=0; e<p->vertex_count; e++) if (p->neighbors[e]==route->corridor[step]) break;
+    if (e==p->vertex_count) return false;
+    a=p->vertices[e]; b=p->vertices[(e+1)%p->vertex_count];
+    ex=b.x-a.x; ey=b.y-a.y; denominator=dx*ey-dy*ex;
+    if (fabsf(denominator)<0.000001f) return false;
+    t=((a.x-from.x)*ey-(a.y-from.y)*ex)/denominator;
+    u=((a.x-from.x)*dy-(a.y-from.y)*dx)/denominator;
+    if (t<*progress-0.0001f || t>1.0001f || u<-0.0001f || u>1.0001f) return false;
+    if (t<*progress) t=*progress;
+    if (t>1.f) t=1.f;
+    *progress=t;
+    crossing_point->x=from.x+dx*t; crossing_point->y=from.y+dy*t;
+    crossing_point->z=plane_z(p,*crossing_point);
+    return true;
+}
+/* port: Check the straight segment from `from` (corridor step first) to `to`
+   (step last) one corridor polygon at a time, each piece on that polygon's
+   own floor: a single chord across a hill hits the ground the walking route
+   clears. A piece across a seam too narrow to stand in must also keep the
+   agent's radius from the seam's open edges, as crossing() requires of the
+   search. A piece of no length (a corner on its portal) needs no check. False,
+   with *fail the step of the refused piece, on a refusal, an ambiguous portal
+   crossing or *checks reaching SN_STRAIGHTEN_CHECKS_MAX. */
+static bool segment_clear(const struct sn_route *route, const struct sn_resource *r,
+    struct sn_point from, uint32_t first, struct sn_point to, uint32_t last,
+    sn_segment_clear clear, void *context, uint32_t *checks, uint32_t *fail)
+{
+    struct sn_point a=from,b;
+    float progress=0.f;
+    uint32_t step;
+    for (step=first; step<=last; step++) {
+        uint32_t polygon=route->corridor[step];
+        const struct sn_polygon *p=&r->polygons[polygon];
+        *fail=step;
+        if (step<last) {
+            if (!shortcut_portal(route,r,step+1,from,to,&progress,&b)) return false;
+        } else b=to;
+        a.z=plane_z(p,a); b.z=plane_z(p,b);
+        if (r->components[polygon]==SN_NONE && !narrow_clear(r,polygon,a,b)) return false;
+        if (!same_point(a,b)) {
+            if (*checks>=SN_STRAIGHTEN_CHECKS_MAX) return false;
+            (*checks)++;
+            if (!clear(context,a,polygon,b,polygon)) return false;
+        }
+        a=b;
+    }
+    return true;
+}
+/* The segments pull.out has gained since its point `from`, each checked. */
+static bool span_clear(const struct sn_route *route, const struct sn_resource *r, uint32_t from,
+    sn_segment_clear clear, void *context, uint32_t *checks, uint32_t *fail)
+{
+    const struct sn_route *out=&pull.out;
+    uint32_t i;
+    for (i=from+1; i<out->count; i++)
+        if (!segment_clear(route,r,out->points[i-1],out->corridor_index[i-1],out->points[i],
+            out->corridor_index[i],clear,context,checks,fail)) return false;
+    return true;
+}
+/* A query result passes through the center of each polygon between its
+   start and goal polygons, a seam excepted (sn_query_result). */
+static bool center_point(const struct sn_route *route, const struct sn_resource *r, uint32_t j)
+{
+    struct sn_point c;
+    if (j==0 || j+1>=route->count) return false;
+    c=r->polygons[route->polygons[j]].center;
+    return route->points[j].x==c.x && route->points[j].y==c.y && route->points[j].z==c.z;
+}
+/* Where to pin a refused span p..q: the center among its inner points whose
+   corridor step is nearest the refusal (the first on a tie); SN_NONE if it
+   has none. At most q-p-1 points. */
+static uint32_t span_pin(const struct sn_route *route, const struct sn_resource *r,
+    uint32_t p, uint32_t q, uint32_t fail)
+{
+    uint32_t j,best=SN_NONE,best_gap=UINT32_MAX;
+    for (j=p+1; j<q; j++) {
+        uint32_t step=route->corridor_index[j],gap=step>fail ? step-fail : fail-step;
+        if (gap<best_gap && center_point(route,r,j)) { best=j; best_gap=gap; }
+    }
+    return best;
+}
+static void straighten_begin(const struct sn_route *route)
+{
+    pull.out=*route; pull.out.count=0;
+    append(&pull.out,route->points[0],route->corridor[0],0);
+}
+/* Replace a found route's points by the shortest path through its corridor
+   (see the header). Keeps the original route when the corridor is
+   inconsistent or the funnel needs more than 4*SN_ROUTE_POLYGONS_MAX^2 steps. */
+void sn_route_straighten(struct sn_route *route, const struct sn_resource *r)
+{
+    uint32_t work=0;
+    assert(route && r);
+    if (!valid_route(route,r) || route->corridor_count<2 || !funnel_portals(route,r)) return;
+    straighten_begin(route);
+    if (!funnel(route,0,route->corridor_count-1,route->points[0],route->points[route->count-1],
+        &work,4u*SN_ROUTE_POLYGONS_MAX*SN_ROUTE_POLYGONS_MAX)) return;
+    *route=pull.out;
+}
+/* port: Collision-checked string pulling (see the header). The route is cut
+   into spans between pins, original points the path must keep: first only
+   its start and goal. A span is pulled tight and each new segment checked; a
+   refused span is split at the original polygon center nearest the refusal,
+   and a span with no center left to pin keeps its original points, which the
+   search cleared. Spans are taken from a stack left to right: each pop emits a
+   span or pins a center not pinned before, so at most 2*count pops; a split
+   that would overflow the stack also keeps the original points, as does every
+   span left when the checks or the funnel work run out. */
+bool sn_route_straighten_checked(struct sn_route *route, const struct sn_resource *r,
+    sn_segment_clear clear, void *context)
+{
+    uint32_t depth=1,checks=0,work=0,pops=0;
+    assert(route && r);
+    if (!clear || !valid_route(route,r) || !funnel_portals(route,r)) return false;
+    straighten_begin(route);
+    pull.span_from[0]=0; pull.span_to[0]=route->count-1;
+    while (depth) {
+        uint32_t p,q,j,base=pull.out.count;
+        assert(pops<2*SN_WAYPOINTS_MAX);
+        pops++;
+        depth--;
+        p=pull.span_from[depth]; q=pull.span_to[depth];
+        if (q>p+1 && checks<SN_STRAIGHTEN_CHECKS_MAX && work<SN_STRAIGHTEN_WORK_MAX) {
+            uint32_t pin,fail=(route->corridor_index[p]+route->corridor_index[q])/2;
+            if (funnel(route,route->corridor_index[p],route->corridor_index[q],route->points[p],
+                    route->points[q],&work,SN_STRAIGHTEN_WORK_MAX) &&
+                span_clear(route,r,base-1,clear,context,&checks,&fail)) continue;
+            pull.out.count=base;
+            pin=span_pin(route,r,p,q,fail);
+            if (pin!=SN_NONE && checks<SN_STRAIGHTEN_CHECKS_MAX && work<SN_STRAIGHTEN_WORK_MAX &&
+                depth+2<=SN_STRAIGHTEN_SPANS_MAX) {
+                pull.span_from[depth]=pin; pull.span_to[depth]=q; depth++;
+                pull.span_from[depth]=p; pull.span_to[depth]=pin; depth++;
+                continue;
+            }
+        }
+        /* (no more than the original route's own points: it fits) */
+        for (j=p+1; j<=q; j++)
+            append(&pull.out,route->points[j],route->polygons[j],route->corridor_index[j]);
+    }
+    *route=pull.out;
+    return true;
 }
 bool sn_route_current(const struct sn_route *route, const struct sn_resource *r, uint64_t obstacles)
 {

@@ -1,4 +1,5 @@
-"""Compile/run the independent BSP polygon navigation core (no game/map required)."""
+"""Compile/run the independent BSP polygon navigation core and its search
+scheduler (no game/map required)."""
 import argparse
 import os
 import shutil
@@ -9,18 +10,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+WARNINGS = ["-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-Wconversion",
+            "-Wsign-conversion", "-Wshadow", "-Wstrict-prototypes",
+            "-Wmissing-prototypes", "-Wformat=2", "-Wundef", "-Wwrite-strings", "-Werror"]
+PROGRAMS = {
+    "test_surface_navigation": ["source/engine_ai/surface_navigation.c",
+                                "tools/test_surface_navigation.c"],
+    "test_surface_navigation_jobs": ["source/engine_ai/surface_navigation.c",
+                                     "source/engine_ai/surface_navigation_jobs.c",
+                                     "tools/test_surface_navigation_jobs.c"],
+}
+
+
 def run(cc, sanitize=False):
     with tempfile.TemporaryDirectory(prefix="surface-navigation-test-") as directory:
-        executable = Path(directory) / "test_surface_navigation"
-        command = [cc, "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-Wconversion",
-                   "-Wsign-conversion", "-Wshadow", "-Wstrict-prototypes",
-                   "-Wmissing-prototypes", "-Wformat=2", "-Wundef", "-Wwrite-strings",
-                   "-Werror", str(ROOT / "source/engine_ai/surface_navigation.c"),
-                   str(ROOT / "tools/test_surface_navigation.c"), "-lm", "-o", str(executable)]
-        if sanitize:
-            command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
-        subprocess.run(command, check=True, timeout=60)
-        subprocess.run([str(executable)], check=True, timeout=60)
+        for name, sources in PROGRAMS.items():
+            executable = Path(directory) / name
+            command = [cc, *WARNINGS, *(str(ROOT / source) for source in sources),
+                       "-lm", "-o", str(executable)]
+            if sanitize:
+                command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+            subprocess.run(command, check=True, timeout=60)
+            subprocess.run([str(executable)], check=True, timeout=60)
 
 
 def test_surface_navigation():

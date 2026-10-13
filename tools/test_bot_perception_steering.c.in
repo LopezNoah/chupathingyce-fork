@@ -70,6 +70,8 @@ struct player_action {
 static struct player_action submitted;
 #define csmemset memset
 static void bot_control_weapon(struct bot *bot,struct player_action *action) { (void)bot; (void)action; }
+/* (friendly-fire gates have their own test: test_bot_fire_safety.py) */
+static void bot_control_grenade(struct bot *bot,struct player_action *action) { (void)bot; (void)action; }
 static void update_server_set_player_action(long player,const struct player_action *action) {
     assert(player==0); submitted=*action;
 }

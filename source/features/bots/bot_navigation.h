@@ -2,8 +2,9 @@
 BOT_NAVIGATION.H
 
 port: per-bot BSP navigation and lane assignment (bot_navigation.c). Each
-agent owns one bounded query and route. The interface hides BSP projections,
-route searches, collision checks, blockage recovery and team lane targets.
+agent owns one bounded route; its searches queue for four workspaces shared
+by all bots. The interface hides BSP projections, route searches, collision
+checks, blockage recovery and team lane targets.
 */
 
 #ifndef HALO_BOT_NAVIGATION_H
@@ -12,12 +13,14 @@ route searches, collision checks, blockage recovery and team lane targets.
 
 #include "cseries/cseries.h"
 #include "engine_ai/behavior_intent.h"
-#include "engine_ai/surface_navigation.h"
+#include "engine_ai/surface_navigation_jobs.h"
 
 /* ---------- constants */
 
 enum
 {
+	/* bot numbers 1..BOT_NAVIGATION_AGENTS_MAX, one search client each */
+	BOT_NAVIGATION_AGENTS_MAX = SN_JOBS_CLIENTS_MAX,
 	BOT_NAVIGATION_LANES = 3,
 	BOT_NAVIGATION_SQUAD_SIZE = 2,
 };
@@ -37,7 +40,7 @@ struct bot_navigation_agent
 	short lane_side;
 	boolean lane_assigned;
 
-	struct sn_query search;
+	uint64_t search_token; /* the scheduler's request, while searching */
 	struct sn_route route;
 	struct sn_point goal;
 	struct sn_point progress_position;
@@ -75,7 +78,17 @@ enum bot_navigation_result
 	BOT_NAVIGATION_FAILED,
 };
 
-/* team_rank counts lower-slot bots on this team. NONE means no team lanes. */
+/* Drop every queued and running search: before a map, BSP or game-state
+ * change, and with a new map's bots. Agents still searching ask again. */
+void bot_navigation_reset_all(void);
+/* Once per tick, before bots decide: lets go of searches no agent asked after
+ * last tick or whose body is gone, then advances the shared searches: at most
+ * four begin, 64 polygons are expanded and one found route is string-pulled
+ * (at most SN_STRAIGHTEN_CHECKS_MAX capsule sweeps), whatever the bot count. */
+void bot_navigation_update(void);
+
+/* team_rank counts lower-slot bots on this team. NONE means no team lanes.
+ * A search left by this slot's previous bot is cancelled. */
 void bot_navigation_agent_initialize(
 	struct bot_navigation_agent *agent,
 	short bot_number,
@@ -87,8 +100,9 @@ void bot_navigation_agent_reset_path(
 	struct bot_navigation_agent *agent);
 
 /* Route to a tactical goal using the map's BSP walkable surfaces and live biped
- * capsule checks. ARRIVED means within arrival_distance; a moving target more
- * than 12 metres from its prior goal causes a bounded replan. */
+ * capsule checks. ARRIVED means within arrival_distance; WAITING while the
+ * search is queued or under way. A queued search follows a moving target; one
+ * under way, or a route, replans when the target is 12 metres from its goal. */
 enum bot_navigation_result bot_navigation_agent_move_to(
 	struct bot_navigation_agent *agent,
 	long unit_index,

@@ -49,9 +49,26 @@ phases keep teammates spread while allowing them to rally on a strong contact.
 Weapon input supports automatic fire, slower semi-auto taps, charging/releasing
 against visible shielded targets at medium range, reloads, switching away from
 empty ammunition weapons, and close-range melee. Charging releases on lost
-sight or changed targets. Bots do not deliberately target teammates. There is
-**no teammate-in-the-line-of-fire or grenade blast safety policy**, so enemy-only
-targeting does not imply friendly-fire immunity.
+sight or changed targets. Bots do not deliberately target teammates, and in
+team games they hold fire while a teammate is in the firing lane: the line
+along the facing actually submitted (after turn speed and aim error), out to
+the skill's fire range, against each teammate's collision pill. The lane
+widens with range by the weapon's own shot cone, read from its trigger tag
+(the error that sustained fire ramps up to, plus pellet spread; at least 2
+degrees, at most half a radian, and invalid tag values ignored). Teammates
+riding in the bot's own vehicle do not block it (projectiles ignore their
+owner's vehicle). A charging or charged trigger is held rather than let go
+into a teammate, and a swap to the other weapon drops the charge unfired. A
+grenade is not thrown when the bot is within 6 world units of where it is
+aimed or of the target; when a teammate is, or will be within the next two
+seconds at its present velocity (its vehicle's, riding); when a teammate is in
+the throwing lane; or when a wall, rock or vehicle stands within 6 units in
+front of the bot. A refused throw is retried after a second. This is
+conservative geometry, not projectile flight: ricochets, blast tags, homing
+and a teammate's turns are not predicted, a turret's lag behind its gunner's
+facing is not modelled, and custom weapons whose charge discharges while held
+are outside it. Driving is not covered: a bot driving a Warthog can still run
+over a teammate.
 
 Bots scan up to 256 nearby weapon, equipment and vehicle objects once per
 second. Weapons and powerups must be within the bot's sight/field of view (or
@@ -272,7 +289,8 @@ Known follow-ups:
 - Re-run the 24-bot lane checker after the current patrol/callout changes;
   validate turret combat and the stop-near-teammate boarding behavior; there is
   no horn control in the current player-input API.
-- Longer Team Slayer lifecycle/endgame tests, other maps, grenade safety,
+- Longer Team Slayer lifecycle/endgame tests, other maps, live friendly-fire
+  behavior (how often bots hold fire or refuse throws in team fights),
   vehicle obstacle avoidance, and supported non-macOS builds.
 
 See [reusable primitive documentation](../source/engine_ai/README.md) for test

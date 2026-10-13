@@ -14,6 +14,10 @@ for isolated geometry acceptance tests. Forge nav authoring is not implemented.
   geometry validation, height-aware projection (also looking down,
   `sn_project_below`), static components, budgeted deterministic A* and
   string-pulled routes. No Halo, ECS, timeline, renderer, heap or network types.
+- `source/engine_ai/surface_navigation_jobs.*`: the bots' shared search queue:
+  four A* workspaces for up to 32 token-scoped requests, with fixed per-tick work.
+- `source/features/bots/bot_navigation.*`: each bot's route, lane goal, following
+  and blockage recovery, on the shared queue.
 - `source/features/bots/navigation_world.*`: validated CE collision edge-ring adapter,
   actual biped tag dimensions/slope, double-buffer publication, live CE capsule
   checks, temporary region blocking and incremental diagnostic dumps.
@@ -97,6 +101,36 @@ points by the shortest path through the corridor (Mononen's simple stupid
 funnel), turning only at portal ends held the agent radius in. Blood Gulch
 patrol routes average ~10 points instead of ~73.
 
+The funnel knows only the polygons, not the scenery standing on them (rocks,
+trees, crates), so a pulled segment could cut through an object the searched
+center/portal path went around. Bots therefore use
+`sn_route_straighten_checked` with the search's own callback: each new segment
+is checked one corridor polygon at a time, on that polygon's floor (one chord
+across a hill would hit the ground), and a piece across a seam must also keep
+the radius from the seam's open edges, as the search's crossing does. A
+refused stretch is pulled again through the original polygon center nearest
+the refusal; a stretch with no center left keeps its searched points. Every
+segment of the result is therefore either checked or the search's own, and
+the route stays smooth away from the obstacle. At most 256 checks per route
+(`SN_STRAIGHTEN_CHECKS_MAX`); once they are spent the rest of the route stays
+as searched. A single straight run across more than 256 polygons therefore
+stays unsmoothed.
+
+**Scheduling.** Bot searches no longer each own an A* query. They queue, one
+per bot, for four shared workspaces (`source/engine_ai/surface_navigation_jobs.*`),
+served in order. Per tick, however many bots there are, at most four queries
+begin (each placing its two endpoints, `sn_project_near`, 3 m down / 1 m
+across), 64 polygons are expanded (16 per workspace, as each bot's own search
+did before) and one found route is string-pulled with its checks. A queued
+search takes the bot's new position and a moving target's new position in
+place, keeping its turn; a found route keeps its workspace until the bot takes
+it. Requests a bot did not ask after for a tick (its behavior changed, it left
+or respawned) and those whose body died are cancelled before each step.
+Queueing adds latency under load: when every bot asks at once (a match start),
+the last ones wait for several searches ahead of them (24 bots on Blood Gulch:
+about 9.5 s for the last, 3.6 s with 32 expansions per workspace; see
+[bot-testing.md](bot-testing.md)).
+
 **Following.** A waypoint is reached within 0.45 m horizontally and 0.35 m
 vertically, or passed: within 2 m and already closer to the next waypoint than
 the waypoint itself is. The live check before each move sweeps **vehicles and
@@ -151,15 +185,23 @@ base's teleporter source, an isolated polygon) are in one component.
   return capacity rather than an incomplete route.
 - Build: at most 128 source/adjacency rows per game tick; no background thread.
 - Probe search: at most 2 polygon expansions per tick, each with at most 8 edges.
-- Each normal bot search: at most 16 polygon expansions per tick, each with at most 8 edges (or 8 × 8 candidate exits through seams). Canonical edge verdicts are mostly cached; seam crossings are swept per query. Moving goals replan after 12 metres.
+- Normal bot searches, all bots together: at most 4 query begins, 64 polygon
+  expansions (16 per workspace), each with at most 8 edges (or 8 × 8 candidate
+  exits through seams), and one checked string-pull (at most 256 capsule sweeps)
+  per tick. Canonical edge verdicts are mostly cached; seam crossings and
+  string-pulled pieces are swept. A query gets at most 1,024 slices. Moving
+  goals of a search under way, or of a route, replan after 12 metres.
 - Dump: at most 64 polygons per tick, published by renaming a `.partial` file.
 - Projection/query initialization is a bounded **linear** polygon scan, not tiled
   or spatially indexed. A* is O((P+E) log P) with an indexed binary heap.
 - Resource 2,818,112 bytes (64 KiB of it static components); two resources plus
   524,304-byte builder, 128 KiB edge cache and the probe's 295,016-byte
-  query/20,560-byte route total about 6.6 MB static reserved storage. Each bot
-  owns a query and a route too: about 316 KB per bot, 9.8 MB for 31 bots.
-  When disabled, geometry buffers are not built/touched. No per-query allocation.
+  query/20,560-byte route total about 6.6 MB static reserved storage. The bots'
+  shared scheduler is 1,267,864 bytes (four queries and four found routes),
+  whatever the bot count, and each bot owns a 20,560-byte route: about 1.9 MB
+  for 31 bots, where one query per bot took 9.8 MB. String-pulling scratch is
+  about 33 KB. When disabled, geometry buffers are not built/touched. No
+  per-query allocation.
 
 This is suitable for validating the architecture, **not a claim of production
 completion** or measured worst-case frame time on every CE map.
@@ -218,7 +260,16 @@ repeat-build determinism, static components (budget-independent), endpoint
 segments that bypass centers, clearance diagnostics, A* choosing the shorter of
 two corridors where breadth-first would not, string pulling (an L turning once
 at the radius-inset corner; straight corridors of 4 and 512 polygons becoming
-one segment) and looking down onto the nearest floor below. They do not emulate every CE collision/asset-loader
+one segment) and looking down onto the nearest floor below. Checked string
+pulling: a rock on the pulled line (kept searched points; pinned through the
+nearest center), pieces on their own ramp floors, a seam's open edge, a
+callback refusing everything, the 256-check budget, invalid/stale routes, and
+591 random routes among random rocks on a 6x6 grid (never crossing a rock,
+never more points than searched). The scheduler test (a second program,
+same runner) covers its per-tick bounds, queue order, refresh before begin,
+results held until taken, one string-pull per tick (oldest first), cancel,
+capacity, stale resources and obstacle revisions, endpoint placement and
+failure diagnostics. They do not emulate every CE collision/asset-loader
 failure or validate real campaign BSP transitions.
 
 Native smoke evidence (legal local retail assets; `/tmp/nav-test`):
