@@ -493,6 +493,26 @@ host with the same number. OpenCE raises it often, usually for additive
 changes (a message older machines drop). Delta handles it with a
 compatibility table and automation, so it stops being hand work.
 
+### Following policy
+
+ChupathingyCE maintains its own code and roadmap. It follows OpenCE's
+**network version** where needed to keep players of both projects able to
+share games; following code changes is a separate, manual decision.
+
+- **Network-version bumps are reviewed by hand.** When OpenCE raises its
+  network version, the change is reviewed for compatibility. An additive
+  raise may be followed with the legacy table or a watch run after the
+  cross-play gate passes. A raise that changes game behavior or internet
+  signalling needs the smallest port that keeps games in agreement.
+- **Code changes are selective.** There is no automatic upstream merge;
+  gameplay and platform changes are evaluated individually and adapted to
+  this fork's code and roadmap.
+- **Servers first.** Dedicated servers move to a network-version follow as
+  soon as it ships, so OpenCE players have a server to join.
+- **Security fixes** in shared code are ported by hand when applicable.
+- **Browser builds** aren't followed: their players can't join our games, nor
+  we theirs.
+
 ### The compatibility table
 
 Built: `port/linux/include/delta.h`, `DELTA_LEGACY_VERSIONS`, one row per
