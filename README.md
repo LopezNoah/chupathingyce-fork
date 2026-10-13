@@ -62,7 +62,7 @@ Get the latest release from the [Releases page](https://github.com/ChupathingyCE
 | Platform | Download | Notes |
 | --- | --- | --- |
 | Windows | `chupathingyce-windows-release.zip` | Windows 10 or later. |
-| Linux (64-bit) | `chupathingyce-linux64-release.zip` | glibc 2.31 or later (Debian 11, Ubuntu 20.04, SteamOS 3). Brings its own SDL3. See [port/linux/README.md](port/linux/README.md). |
+| Linux (64-bit) | `chupathingyce-linux64-release.zip` | glibc 2.31 or later (Debian 11, Ubuntu 20.04). Brings its own SDL3. See [port/linux/README.md](port/linux/README.md). |
 | Linux (32-bit, older systems) | `chupathingyce-linux-release.zip` | glibc 2.31 or later (32-bit). Brings its own SDL3. See [port/linux/README.md](port/linux/README.md). |
 | Android | `chupathingyce-android-release.zip` | Android 9 or later, 64-bit. See [port/android/README.md](port/android/README.md). |
 | Mac | `chupathingyce-macos-release.zip` | macOS 13 or later, Apple silicon or Intel. |
@@ -228,7 +228,7 @@ the wrong `[section]`, a value missing its quotes (`menus = "pc"`, not
 | --- | --- |
 | Windows | next to `halo.exe` |
 | Mac | `~/Library/Application Support/ChupathingyCE/config.toml` |
-| Linux and Steam Deck | next to the `halo` executable |
+| Linux | next to the `halo` executable |
 | Android | in the game's data folder, `/sdcard/Android/data/dev.horrible.chupathingyce/files` |
 
 A few people look for most:

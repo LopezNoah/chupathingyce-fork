@@ -147,10 +147,10 @@ network, and it is a dedicated server too (`server/README.md`).
 
 Enter `build/linux/halo`.
 
-To play on a Steam Deck, unpack `chupathingyce-linux64-release.zip` into a
-folder (in Desktop Mode), and add `halo` to Steam as a non-Steam game ("Add
-a Game" in the Games menu of Steam). The game then starts in Game Mode as
-well.
+The Steam Deck is not a supported platform yet. The Linux build may run
+on it: unpack `chupathingyce-linux64-release.zip` into a folder (in Desktop
+Mode), and add `halo` to Steam as a non-Steam game ("Add a Game" in the
+Games menu of Steam). Reports are welcome in #bug-reports on the Discord.
 
 The game data is the folder that contains `maps/`, from an Xbox disc image
 of any version of the game. The game looks for this folder in this
