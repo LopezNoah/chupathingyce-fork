@@ -62,8 +62,8 @@ Get the latest release from the [Releases page](https://github.com/ChupathingyCE
 | Platform | Download | Notes |
 | --- | --- | --- |
 | Windows | `chupathingyce-windows-release.zip` | Windows 10 or later. |
-| Linux (64-bit) | `chupathingyce-linux64-release.zip` | Needs SDL3. See [port/linux/README.md](port/linux/README.md). |
-| Linux (32-bit, older systems) | `chupathingyce-linux-release.zip` | Needs SDL3 (32-bit). See [port/linux/README.md](port/linux/README.md). |
+| Linux (64-bit) | `chupathingyce-linux64-release.zip` | glibc 2.31 or later (Debian 11, Ubuntu 20.04, SteamOS 3). Brings its own SDL3. See [port/linux/README.md](port/linux/README.md). |
+| Linux (32-bit, older systems) | `chupathingyce-linux-release.zip` | glibc 2.31 or later (32-bit). Brings its own SDL3. See [port/linux/README.md](port/linux/README.md). |
 | Android | `chupathingyce-android-release.zip` | Android 9 or later, 64-bit. See [port/android/README.md](port/android/README.md). |
 | Mac | `chupathingyce-macos-release.zip` | macOS 13 or later, Apple silicon or Intel. |
 
@@ -313,8 +313,8 @@ Useful `configure.py` options:
 | Option | What it does |
 | --- | --- |
 | `--release` | A release build, as players get. Without it, a failed check stops the game. |
-| `--portable` | A Linux or Windows build that runs on any x86-64 computer, or a universal Mac application, to give to others. |
-| `--no-game-browser` | Leaves out the server list, stats and dedicated servers, as OpenCE's builds are. |
+| `--portable` | A Linux or Windows build that runs on any x86-64 computer, or a universal Mac application, to give to others. Linux builds also run on older distributions and SteamOS; see [Portable build](port/linux/README.md#portable-build). |
+| `--no-game-browser` | Leaves out the server list, stats and dedicated servers, as the other builds are. |
 | `--infection` | Builds in the experimental Infection mode ([docs/infection.md](docs/infection.md)). Off by default. |
 | `--bots` | Builds in the experimental multiplayer bots and their navigation ([docs/bots.md](docs/bots.md)). Off by default. |
 | `--pgo=off`, `--lto=off` | Faster builds, without profile-guided or link-time optimisation. |
