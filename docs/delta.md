@@ -506,7 +506,9 @@ share games; following code changes is a separate, manual decision.
   signalling needs the smallest port that keeps games in agreement.
 - **Code changes are selective.** There is no automatic upstream merge;
   gameplay and platform changes are evaluated individually and adapted to
-  this fork's code and roadmap.
+  this fork's code and roadmap. Ports that need code are batched into a
+  release about once a week unless cross-play is broken; larger ports are
+  weighed against the players they keep.
 - **Servers first.** Dedicated servers move to a network-version follow as
   soon as it ships, so OpenCE players have a server to join.
 - **Security fixes** in shared code are ported by hand when applicable.
