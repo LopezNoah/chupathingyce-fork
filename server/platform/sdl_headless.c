@@ -43,11 +43,6 @@ int SDL_strncasecmp(const char *first, const char *second, size_t length)
 	return strncasecmp(first, second, length);
 }
 
-int SDL_strcasecmp(const char *first, const char *second)
-{
-	return strcasecmp(first, second);
-}
-
 bool SDL_SetHint(const char *name, const char *value)
 {
 	(void)name;

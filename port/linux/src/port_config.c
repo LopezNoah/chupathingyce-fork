@@ -1539,7 +1539,7 @@ static void config_check_words(void)
 		if (index < 0 || !(config_settings[index].platforms & CONFIG_PLATFORM))
 			continue;
 		value = &config_values[index];
-		for (word = 0; words[word] && SDL_strcasecmp(value->string, words[word]); word++)
+		for (word = 0; words[word] && SDL_strncasecmp(value->string, words[word], strlen(words[word]) + 1); word++)
 		{
 		}
 		if (words[word])
