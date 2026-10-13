@@ -2,10 +2,10 @@
 
 <h1 align="center">ChupathingyCE</h1>
 
-<p align="center"><b>Halo: Combat Evolved on Windows, Mac, Linux and Android: a community build of OpenCE, with its own releases, dedicated servers and the Delta network family.</b></p>
+<p align="center"><b>Halo: Combat Evolved on Windows, macOS, Linux and Android: a fork of ChupathingyCE, itself based on OpenCE.</b></p>
 
 <p align="center">
-<a href="https://github.com/ChupathingyCE/chupathingyce/releases/latest">Download</a> ·
+<a href="https://github.com/LopezNoah/chupathingyce/releases/latest">Download</a> ·
 <a href="https://halo.milenko.org">Games online now</a> ·
 <a href="https://discord.gg/4BUm2FwuCB">Discord</a>
 </p>
@@ -13,11 +13,7 @@
 > **Compatible with [OpenCE](https://github.com/OpenCommunityEdition/OpenCE) build-201 (network version 28).** OpenCE build-201 players join our games, and our builds join games hosted on network versions 11 through 30 (OpenCE build-76 onward). Games hosted on older builds (network version 10) can't be joined; their hosts need to update. OpenCE's browser players can't join our games, nor we theirs.
 > Players on OpenCE and players on ChupathingyCE play together.
 
-ChupathingyCE is a community build of **OpenCE**, the port of the Halo: Combat
-Evolved decompilation to modern computers and phones. Our goal is a unified
-online experience, plus our own tweaks, on a project that's still in its
-infancy. We stay compatible with OpenCE, offer our fixes back to it, and put
-out our own releases. Expect rough edges, and please report them.
+This repository is a fork of [ChupathingyCE](https://github.com/ChupathingyCE/chupathingyce), which is itself based on [OpenCE](https://github.com/OpenCommunityEdition/OpenCE), the port of the Halo: Combat Evolved decompilation to modern computers and phones. We preserve ChupathingyCE and OpenCE compatibility while developing additional work here. This fork currently includes work in progress on Forge mode, Infection, multiplayer bots, and an opt-in native macOS Metal renderer. These features are experimental and may be incomplete; see the build options and feature documentation before enabling them.
 
 <p align="center"><img src="docs/screenshots/lobby.jpg" width="720" alt="A multiplayer lobby"></p>
 
@@ -43,6 +39,10 @@ out our own releases. Expect rough edges, and please report them.
 - Controller prompts for Xbox, PlayStation and Nintendo pads, and the keyboard
 - Updates itself: it checks for new releases when it starts, and asks first
 
+**Work in progress in this fork**
+- Forge mode, Infection and multiplayer bots are experimental build-time features; bots and Infection are opt-in.
+- The native macOS Metal renderer is experimental and opt-in; the default macOS renderer remains OpenGL.
+
 **Platforms**
 
 | | Windows | Mac | Linux | Android |
@@ -57,7 +57,7 @@ out our own releases. Expect rough edges, and please report them.
 
 ## Download
 
-Get the latest release from the [Releases page](https://github.com/ChupathingyCE/chupathingyce/releases/latest):
+Get the latest release from the [Releases page](https://github.com/LopezNoah/chupathingyce/releases/latest):
 
 | Platform | Download | Notes |
 | --- | --- | --- |
