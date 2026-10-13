@@ -694,6 +694,8 @@ struct config_value
 };
 
 static struct config_value config_values[NUMBER_OF_CONFIG_SETTINGS];
+/* whether the file or the environment gives the setting a value */
+static int config_given[NUMBER_OF_CONFIG_SETTINGS];
 static int config_loaded = 0;
 static pthread_mutex_t config_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1496,6 +1498,88 @@ static char *config_update_layout(const char *text, toml_datum_t table)
 	return out.buffer;
 }
 
+/* ---------- words */
+
+/* the settings that take one of a few words: one in any case is taken (as
+written here), and another is said once in the log */
+static const struct
+{
+	const char *name;
+	/* NULL ended; "" where empty is one */
+	const char *words[8];
+	/* what the game does with another, for the log (NULL: what reads the
+	setting says it) */
+	const char *otherwise;
+} config_words[] =
+{
+	{ "display.mode", { "", "fullscreen", "borderless", "windowed", NULL }, "display.fullscreen's" },
+	{ "display.resolution_scaling", { "native", "original", NULL }, "\"native\"" },
+	{ "display.anti_aliasing", { "off", "fxaa", "smaa", "ssaa2x", "msaa2x", "msaa4x", "msaa8x", NULL }, NULL },
+	{ "display.menus", { "xbox", "pc", NULL }, NULL },
+	{ "display.player_names", { "all", "allies", "allys", "enemies", "none", NULL }, "\"all\"" },
+	{ "display.scoreboard_team_layout", { "teams", "score", NULL }, "\"teams\"" },
+	{ "audio.resampling", { "sinc", "linear", NULL }, "\"sinc\"" },
+	{ "input.touch_controls", { "on", "auto", "off", NULL }, "\"on\"" },
+	{ "game.console_log", { "important", "all", "none", NULL }, "\"important\"" },
+	{ "game.move_old_map_folders", { "ask", "yes", "no", NULL }, "\"ask\"" },
+	{ "network.protocol", { "auto", "opence", "delta", NULL }, NULL },
+	{ "network.platform_limits", { "on", "off", NULL }, "\"on\"" },
+	{ "network.coop_friendly_fire", { "off", "on", "shields_only", "explosives_only", NULL }, NULL },
+	{ "network.coop_enemies_mode", { "none", "per_player", "multiplier", NULL }, "\"none\"" },
+	{ "crash_reports.upload", { "ask", "yes", "no", NULL }, "\"ask\"" },
+};
+
+#define NUMBER_OF_CONFIG_WORDS (sizeof(config_words) / sizeof(config_words[0]))
+
+/* the word settings' values as their readers compare them (lowercase:
+"Borderless" is "borderless"), and the log told of one that is none of
+its words */
+static void config_check_words(void)
+{
+	size_t word_index;
+
+	for (word_index = 0; word_index < NUMBER_OF_CONFIG_WORDS; word_index++)
+	{
+		long index = config_setting_index(config_words[word_index].name);
+		const char *const *words = config_words[word_index].words;
+		struct config_value *value;
+		char list[160] = "";
+		size_t word;
+
+		if (index < 0 || !(config_settings[index].platforms & CONFIG_PLATFORM))
+			continue;
+		value = &config_values[index];
+		for (word = 0; words[word] && SDL_strcasecmp(value->string, words[word]); word++)
+		{
+		}
+		if (words[word])
+		{
+			if (strcmp(value->string, words[word]))
+			{
+				free(value->string);
+				value->string = strdup(words[word]);
+			}
+			continue;
+		}
+		if (!config_words[word_index].otherwise)
+			continue;
+		/* ("a", "b" or "c", and "or empty" for "") */
+		for (word = 0; words[word]; word++)
+		{
+			size_t length = strlen(list);
+
+			if (!words[word][0])
+				continue;
+			snprintf(list + length, sizeof(list) - length, "%s\"%s\"",
+				!length ? "" : !words[word + 1] && words[0][0] ? " or " : ", ", words[word]);
+		}
+		if (!words[0][0])
+			snprintf(list + strlen(list), sizeof(list) - strlen(list), " or empty");
+		platform_log("settings: %s = \"%s\" is not %s; using %s", config_words[word_index].name, value->string, list,
+			config_words[word_index].otherwise);
+	}
+}
+
 /* the most lines of a file that cannot be read that are skipped to read
 the rest */
 #define CONFIG_MAXIMUM_SKIPPED_LINES 16
@@ -1654,7 +1738,10 @@ static void config_load(void)
 				}
 			}
 			for (index = 0; index < NUMBER_OF_CONFIG_SETTINGS; index++)
+			{
 				config_set_from_file(&config_values[index], &config_settings[index], result.toptab);
+				config_given[index] = toml_seek(result.toptab, config_settings[index].name).type != TOML_UNKNOWN;
+			}
 			config_report_unknown_keys(result.toptab);
 			platform_log("settings: %s", path);
 			completed = skipped ? NULL : config_add_missing(text, result.toptab);
@@ -1700,6 +1787,7 @@ static void config_load(void)
 		HALO_LOG_ADDRESSES=0 never turns a setting on) */
 		if (!environment || (setting->environment_style != _environment_value && !config_environment_set(environment)))
 			continue;
+		config_given[index] = 1;
 		switch (setting->environment_style)
 		{
 		case _environment_value:
@@ -1713,6 +1801,23 @@ static void config_load(void)
 			break;
 		}
 	}
+	config_check_words();
+#ifndef HALO_ANDROID
+	{
+		long mode = config_setting_index("display.mode");
+		long fullscreen = config_setting_index("display.fullscreen");
+
+		/* (said once: which of the two the window follows) */
+		const char *value = config_values[mode].string;
+
+		if ((!strcmp(value, "fullscreen") || !strcmp(value, "borderless") || !strcmp(value, "windowed")) &&
+			config_given[fullscreen])
+		{
+			platform_log("settings: display.mode = \"%s\" is used; display.fullscreen is ignored",
+				config_values[mode].string);
+		}
+	}
+#endif
 }
 
 static const struct config_value *config_value(const char *name, enum config_type type)
