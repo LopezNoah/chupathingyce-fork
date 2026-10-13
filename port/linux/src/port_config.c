@@ -1381,33 +1381,25 @@ static void config_report_commented(const char *text, toml_datum_t table)
 
 /* a file from before config_version (text, parsed as table) wrote every
 setting at the default of the version that wrote it, so that a default
-changed since never reached it: its lines holding this version's default or
-an older one are commented out at this version's default, as a new file has
-them, and config_version written. Values that are no default stay, being
-the player's. Returns the new text, or NULL if the file has its version */
+changed since never reached it: its lines holding this version's default
+are commented out at it, as a new file has them, and config_version
+written. Any other value stays, being the player's, even an older
+version's default (the player may have chosen it: display.menus = "pc"),
+which the log says. Returns the new text, or NULL if the file has its
+version */
 static char *config_update_layout(const char *text, toml_datum_t table)
 {
 	toml_datum_t version = toml_seek(table, "config_version");
 	int lines[NUMBER_OF_CONFIG_SETTINGS];
 	struct config_text out = { NULL, 0, 0 };
-	struct config_text changed = { NULL, 0, 0 };
-	int line_number = 1, defaults = 0, version_written, written_by_game;
+	int line_number = 1, defaults = 0, version_written;
 	const char *line;
-	size_t index, present = 0;
+	size_t index;
 
 	if (version.type == TOML_INT64 && version.u.int64 >= CONFIG_VERSION)
 		return NULL;
 	/* (an older version's line is changed where it is) */
 	version_written = version.type != TOML_UNKNOWN;
-	/* (the builds before config_version wrote every setting as a value: a
-	file holding fewer than half of them was written by a person, whose
-	values, an older default's included, are theirs) */
-	for (index = 0; index < NUMBER_OF_CONFIG_SETTINGS; index++)
-	{
-		if (toml_seek(table, config_settings[index].name).type != TOML_UNKNOWN)
-			present++;
-	}
-	written_by_game = present * 2 >= NUMBER_OF_CONFIG_SETTINGS;
 	for (index = 0; index < NUMBER_OF_CONFIG_SETTINGS; index++)
 	{
 		const struct config_setting *setting = &config_settings[index];
@@ -1422,17 +1414,14 @@ static char *config_update_layout(const char *text, toml_datum_t table)
 			lines[index] = datum.lineno;
 			continue;
 		}
-		for (old = 0; written_by_game && old < NUMBER_OF_CONFIG_OLD_DEFAULTS; old++)
+		for (old = 0; old < NUMBER_OF_CONFIG_OLD_DEFAULTS; old++)
 		{
 			if (!strcmp(config_old_defaults[old].name, setting->name) &&
 				config_datum_is(datum, setting->type, config_old_defaults[old].default_value))
 			{
-				char buffer[256];
-
-				lines[index] = datum.lineno;
-				snprintf(buffer, sizeof(buffer), "%s%s (%s, now %s)", changed.length ? ", " : "", setting->name,
+				platform_log("settings: %s = %s is kept (an older version's default; this version's is %s, which "
+					"commenting the line out follows)", setting->name,
 					config_old_defaults[old].default_value, setting->default_value);
-				config_append(&changed, buffer);
 			}
 		}
 	}
@@ -1491,10 +1480,8 @@ static char *config_update_layout(const char *text, toml_datum_t table)
 			config_append(&out, "\n");
 		config_append(&out, CONFIG_VERSION_TEXT);
 	}
-	platform_log("settings: config.toml updated (config_version %d): %d lines at a default commented out, to follow "
-		"this version's%s%s", CONFIG_VERSION, defaults, changed.length ? "; changed defaults: " : "",
-		changed.length ? changed.buffer : "");
-	free(changed.buffer);
+	platform_log("settings: config.toml updated (config_version %d): %d lines at this version's default commented "
+		"out, to follow it; every other value is kept", CONFIG_VERSION, defaults);
 	return out.buffer;
 }
 
