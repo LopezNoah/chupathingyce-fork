@@ -17,6 +17,15 @@ They are real Halo player datums with normal spawning, scoring, weapons, damage
 and respawning; their inputs enter the same player-action pipeline as a human.
 Campaign AI is unchanged.
 
+Standard two-flag CTF is opt-in (`bots.ctf = true`, `HALO_BOT_CTF=true`), with
+an explicitly experimental lobby entry. Hidden Battle Creek and Blood Gulch
+matches have verified both teams' captures and friendly touch-returns. Bots take
+and return flags, deliver while carrying, and guard or search the public enemy
+stand to recover a carried friendly flag. They never read hidden carrier
+positions or award their own scores. Other maps retain navigation limitations;
+see [CTF validation and scope](bot-objective-modes.md). King, Oddball, Assault,
+single-flag and manual-reset CTF remain unsupported.
+
 Only a local game or network host with no remote distributed machines may run
 bots. Bots leave when that gate stops permitting them, including postgame,
 unsupported modes or a remote machine joining. They are **not replicated bots

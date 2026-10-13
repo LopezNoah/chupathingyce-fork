@@ -34,6 +34,7 @@ enum bot_ambition_kind
 	_bot_ambition_hold, /* stand inside it (a hill) */
 	_bot_ambition_hunt, /* kill whoever carries it (an enemy flag carrier) */
 	_bot_ambition_reach, /* touch it (a race flag) */
+	_bot_ambition_return, /* touch one's dropped flag; no inventory acquisition */
 	NUMBER_OF_BOT_AMBITION_KINDS
 };
 
@@ -43,6 +44,7 @@ struct bot_ambition
 {
 	short kind;
 	short owner_team_index; /* NONE: nobody's */
+	short acting_team_index; /* port: the team assigned this objective duty */
 	/* the teams that may use it, a bit for each team; in free for all every
 	player is allowed */
 	unsigned long team_mask;
@@ -67,6 +69,11 @@ void bot_manager_update(
 
 short bot_manager_ambition_count(
 	void);
+
+/* port: standard CTF goal selection. One claimant per team pursues each loose
+flag; other bots guard. Carriers always deliver, regardless of shared contacts. */
+boolean bot_manager_ctf_goal(long team_index, long player_index, short bot_number,
+	long unavailable_object_index, struct bot_ambition *goal);
 
 /* NULL past the count */
 struct bot_ambition const *bot_manager_ambition_get(

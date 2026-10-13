@@ -1,20 +1,103 @@
 # Bot objective modes: source audit and implementation gates
 
-Status: design, not implemented. The PC/XML and Xbox Bot Match menus still
-advertise only FFA Slayer and Team Slayer. This audit does not relax
-`bots_host_may_have_bots()` or change network compatibility.
+Status: standard two-flag CTF implemented and live-checked on Battle Creek and
+Blood Gulch. `bots.ctf = true` (`HALO_BOT_CTF=true`) opts into an explicitly
+experimental entry in both PC/XML and Xbox lobbies and host admission; off by
+default. Assault, manual-reset and single-flag variants remain refused. There
+is no wire-format or network-version change.
 
-## Why selecting another variant is not enough
+## Implemented CTF boundary and execution
 
-- `source/features/bots/bot_manager.c:bot_manager_publish_ambitions()` clears
-  the list every tick and publishes nothing.
+- `halo_bot_objectives.h` exposes caller-owned, read-only two-flag snapshots.
+  The engine adapter checks stands, salted flag/carrier/player datums, living
+  carriers, inventory links and finite positions; enemy carrier positions
+  are not copied. Scoring availability and engine-awarded capture totals are
+  copied, never changed by the adapter.
+- The manager publishes take, friendly-return, carrier-only delivery and
+  fallback guard goals. If the friendly flag is carried, non-carrier allies
+  search the enemy's public stand and engage through ordinary perception,
+  rather than staying home through a two-carrier stalemate. No live carrier
+  position is used for this inferred search destination. Team-scoped pickup
+  claims have bounded lifetimes.
+  Bots copy goal identities, invalidate them on ownership/life/map changes,
+  release claims, and back off unreachable pickups for 15 seconds. Route
+  retries belong to the failed duty only: a new guard or carrier cannot inherit
+  pickup's standstill, and non-pickup routes retry after one second. Navigation
+  and the ordinary engine auto-pickup path perform interactions; proximity
+  alone is not treated as a completed pickup, return or capture.
+- Carriers prioritize delivery, do not switch to normal guns or throw stale
+  grenades, and wait at their stand without stall-recovery impulses while
+  their own flag is away. CTF uses an on-foot policy, not vehicle scavenging.
+- The private lobby leaves persistent `bots.count` at zero. BSP navigation
+  now also checks effective lobby demand; otherwise objective bots had goals
+  but no mesh and never moved.
+- `tools/test_bot_ctf.py` compiles production adapter, manager, execution and
+  engine pickup/return/capture/drop callbacks with ASan/UBSan. The unit/physics
+  seams are fake-world operations. Tests cover actual engine-owned score and
+  return counters, the strict capture boundary, own-flag-away/scoring/client
+  gates, stale/dead carriers, drop/reset, claims, stand waits and retries.
+- Three route regressions are locked down: extra wall-clearance inflation
+  steering away from a capsule-checked route; a fixed 0.65 m probe hitting a
+  wall beyond a nearby waypoint; and XY-only arrival accepting another floor.
+  Routes now prefer exact live-capsule clearance, shorten probes to the next
+  waypoint, and require the follower's 0.35 m floor tolerance for arrival.
+  Steering still performs at most sixteen live capsule sweeps per bot/tick.
+
+## Live evidence and remaining scope
+
+Hidden native PC-menu rounds now acquire and score flags through ordinary
+movement and auto-pickup. The normal-speed lobby run `bot-lobby-ks0mdbfg` recorded
+an engine capture. Accelerated Battle Creek `ctf-beavercreek-dynonhwb` recorded
+both teams' captures and a friendly touch-return. Blood Gulch
+`ctf-bloodgulch-4x6d71it` recorded both teams' captures and both teams' touch-returns,
+including the public-stand rescue policy. Artifacts are under
+`/private/tmp/bot-ctf-live-checks/`. Earlier failed artifacts remain for diagnosis.
+
+After a bots-enabled build:
+
+```sh
+python3 tools/check_bot_ctf_live.py --maps /path/to/maps --map beavercreek
+python3 tools/check_bot_ctf_live.py --maps /path/to/maps --map bloodgulch --seconds 80
+python3 tools/check_bot_lobby_live.py --menus pc --mode ctf --maps /path/to/maps
+```
+
+Each checker opts in only for its isolated process. The fast checker requires
+both flags to be acquired and a real capture; add `--both-captures` to require
+a capture by each team as in the release samples. The normal lobby checker
+requires a real capture, not just goals or movement. Match outcomes can be one-sided, so a
+short run's failure to score on one team needs artifact inspection rather than
+being treated automatically as a navigation defect. A one-sided roster cannot
+score in the engine's inactive state and is not a useful capture fixture.
+
+These fixes do not implement general floor transitions, teleporter links,
+vehicle carriers or flawless combat. Waypoint stalls still occur and are bounded
+by the existing blockage/replan policy. Other maps and platforms need their own
+live validation. Keep CTF opt-in; King and Oddball remain design work.
+
+## Remaining work
+
+- Validate CTF on the other lobby maps and on Linux, Windows and Android.
+  Android was not built here: the current configuration has no `android` target.
+- Reduce remaining waypoint stalls; general floor transitions and teleporter
+  routing are not implemented. Keep `bots.ctf` off by default until wider checks.
+- Implement static/normal King next, then single normal Oddball, with actual
+  engine scoring and lifecycle tests before adding their lobby entries.
+- Test richer CTF variants separately: Assault, single-flag and manual-reset
+  rules remain refused, not implicitly enabled by the CTF engine index.
+- Objective vehicle use and online bot replication remain separate projects.
+  Bots in this increment are local and on foot; no network version was raised.
+
+## Baseline audit: why selecting another variant was not enough
+
+- Before this increment, `bot_manager_publish_ambitions()` cleared the list
+  every tick and published nothing.
 - `bot_manager.h` defines take, deliver, guard, hold, hunt and reach ambitions,
-  but `bots.c` does not read the ambition getters or score those behaviours.
+  but `bots.c` did not read the ambition getters or score those behaviours.
   `bot_score_behaviors`, `bot_leaf_viable` and the behaviour/intent dispatch
   need actual objective execution, not just new goals on the blackboard.
-- `bots_host_may_have_bots()` rejects every non-Slayer engine. Removing that
+- The original `bots_host_may_have_bots()` rejected every non-Slayer engine. Removing that
   check would give objective matches Slayer roaming, not objective bots.
-- Pickup claims and lane squads exist, but they do not assign objective roles.
+- Pickup claims and lane squads existed, but did not assign objective roles.
 - Navigation is continuous walking plus local ascent attempts, not general
   floor-transition or teleporter routing. An objective being published or a
   route being constructed is not proof a bot can reach or score it.

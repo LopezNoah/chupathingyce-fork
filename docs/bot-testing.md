@@ -31,6 +31,38 @@ git diff --check
 `--cc clang` selects the compiler on the Python C runners. A successful primitive
 test is not proof of live bot movement.
 
+### Standard two-flag CTF
+
+`python3 -m pytest -q tools/test_bot_ctf.py` compiles production CTF pickup,
+return, capture and drop callbacks, the copied-state adapter, manager, objective
+execution and floor-arrival checks with ASan/UBSan. Unit/physics operations are
+fake-world seams, not bot-side ownership or score writes. Cases include friendly
+return without inventory acquisition, the strict 1 m capture boundary,
+own-flag-away/scoring/client gates, stale and dead carriers, drop/reset, claims,
+intentional stand waits, retries, two-carrier rescue duties and hidden-position
+isolation. Carrier weapon/grenade restrictions are in `test_bot_fire_safety.py`.
+
+After a bots-enabled build, use legal Xbox map assets:
+
+```sh
+python3 tools/check_bot_ctf_live.py --maps /path/to/maps --map beavercreek
+python3 tools/check_bot_ctf_live.py --maps /path/to/maps --map bloodgulch --seconds 80
+python3 tools/check_bot_lobby_live.py --maps /path/to/maps --menus pc --mode ctf
+python3 tools/check_bot_lobby_live.py --maps /path/to/maps --menus xbox --mode ctf --accelerated
+```
+
+The runners use hidden windows, fresh saves and disabled online/reporting, and
+opt into CTF only for their own process. The fast runner advances game time at
+20x (the same debug timing setting is now registered on macOS); menu input stays
+on wall time. It requires both flags to be acquired and a real capture, not
+just reaching a goal. Add `--both-captures` for the stricter release sample of
+a capture by each team. Real match outcomes vary; that stricter gate can
+legitimately fail for a one-sided round. Inspect its retained artifacts rather than assuming a route
+bug. The ordinary lobby checker requires an actual capture by either team.
+
+CTF stays off by default (`bots.ctf = false`); King and Oddball are not enabled.
+See [objective scope and validation](bot-objective-modes.md).
+
 ### Camouflage and final steering seams
 
 `test_bot_perception_steering.py` compiles the real perception, recovery and
@@ -47,8 +79,11 @@ file supplies only fixtures/stubs). It checks:
   Eight candidate headings and two clearance passes bound this to sixteen
   capsule sweeps per bot per tick, each with eight collision planes. The live
   capsule includes crouch height and follows its current support plane uphill.
-  Ordinary movement first prefers 0.12 m of extra wall clearance; retreat
-  initially accepts 0.02 m. Both can fall back to an exact capsule fit. If all
+  Free movement first prefers 0.12 m of extra wall clearance; retreat
+  initially accepts 0.02 m. Following an already capsule-checked BSP route uses
+  the exact capsule first and caps the probe at the next waypoint's distance:
+  extra clearance or a wall beyond the waypoint must not steer a bot away
+  from a valid route. Both free policies can fall back to an exact fit. If all
   probes fail, movement stops rather than submitting a blocked heading.
 - Fake-wall, narrow-passage, boxed-in, uphill and seated/no-move cases, including
   submission of recovery-generated movement. Vehicle steering is unchanged.

@@ -67,7 +67,7 @@ static void game_engine_player_added(long p) {
     assert(p==1); added_player.team_index=1; added_player.network_player_data.team_index=1;
 }
 struct halo_ui_pointer { int right_clicks, left_clicks, click_x, click_y; };
-struct game_variant { int teams; };
+struct game_variant { int teams, ctf; };
 struct game_variant_options { int auto_team_balance; byte loadout, primary_weapon, secondary_weapon; };
 static int available=1, present=1, profile, client_disposed, server_disposed, remote=-1;
 static int cleared, connection=-1, closed, transitioned;
@@ -94,6 +94,8 @@ static int get_next_event(struct event_record *e, int controller) {
     assert(controller==NONE); if(!has_event) return 0; *e=queued; has_event=0; return 1;
 }
 static void event_manager_flush(void) { has_event=0; }
+static int ctf_enabled;
+static int config_boolean(char const *name) { assert(!strcmp(name,"bots.ctf")); return ctf_enabled; }
 static long config_integer(char const *name) { assert(!strcmp(name,"bots.count")); return 0; }
 static char const *config_string(char const *name) { assert(!strcmp(name,"bots.skill")); return "marine"; }
 static void queue_button(short button, byte held) {
@@ -101,7 +103,9 @@ static void queue_button(short button, byte held) {
 }
 static int cache_files_map_present(char const *p, unsigned long v) { (void)p; assert(v==0); return present; }
 static int cache_files_map_plays_multiplayer(char const *p, char *b) { (void)p; (void)b; return available; }
-static void game_engine_get_variant_by_name(struct game_variant *v, char const *n) { v->teams=!strcmp(n,"team_slayer"); }
+static void game_engine_get_variant_by_name(struct game_variant *v, char const *n) {
+    v->ctf=!strcmp(n,"ctf"); v->teams=v->ctf || !strcmp(n,"team_slayer");
+}
 static void game_variant_options_default(struct game_variant const *v, struct game_variant_options *o) {
     (void)v; memset(o,0,sizeof(*o)); o->auto_team_balance=1;
 }
@@ -241,6 +245,14 @@ int main(void) {
     assert(strstr(bot_lobby_xml_status(),"Map unavailable"));
     present=1; available=1; assert(bot_lobby_xml_start());
     assert(!lobby.active && !launched.teams && lobby_match.enemy_count==1);
+    bot_lobby_xml_open(); bot_lobby_xml_change(1,1); assert(lobby.values[1]==0); /* default: no CTF */
+    lobby.values[1]=2; assert(!bot_lobby_xml_start()); assert(strstr(bot_lobby_xml_status(),"disabled"));
+    ctf_enabled=1;
+    bot_lobby_xml_open(); bot_lobby_xml_change(1,1); /* Team Slayer -> opt-in CTF */
+    assert(lobby.values[1]==2);
+    bot_lobby_xml_text(1,text,sizeof(text)); assert(strstr(text,"CTF (experimental)"));
+    assert(bot_lobby_xml_start() && launched.ctf && launched.teams);
+    bot_lobby_xml_change(1,1); assert(lobby.values[1]==0); /* CTF -> FFA */
     return 0;
 }
 '''

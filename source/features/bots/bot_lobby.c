@@ -27,6 +27,7 @@
 extern short player_spawn_count;
 void game_connection_set(short connection);
 long config_integer(char const *name);
+int config_boolean(char const *name);
 char const *config_string(char const *name);
 
 enum {
@@ -49,6 +50,10 @@ static char const *const maps[][2] = {
 };
 /* mp_map_grafix's frames, in the same order as maps above. */
 static short const map_frames[] = { 9, 0, 8, 7, 6, 2, 5, 12, 4, 11, 3, 1, 10 };
+/* port: Both menu frontends select the same supported standard variants. */
+static char const *const modes[] = { "FFA Slayer", "Team Slayer", "CTF (experimental)" };
+static char const *const variants[] = { "slayer", "team_slayer", "ctf" };
+typedef char bot_lobby_modes_check[NUMBEROF(modes) == NUMBEROF(variants) ? 1 : -1];
 static char const *const skills[] = { "Recruit", "Marine", "ODST", "Spartan" };
 static char const *const weapons[] = {
     "None", "Random", "Assault Rifle", "Magnum", "Shotgun", "Sniper Rifle",
@@ -99,10 +104,12 @@ static boolean row_mutable(short row)
 
 static void change(short direction)
 {
-    short maximum[ROWS] = { NUMBEROF(maps) - 1, 1, 31, 31, NUMBEROF(skills) - 1, 1,
+    short maximum[ROWS] = { NUMBEROF(maps) - 1, NUMBEROF(modes) - 1, 31, 31, NUMBEROF(skills) - 1, 1,
         NUMBER_OF_LOADOUT_WEAPONS - 1, NUMBER_OF_LOADOUT_WEAPONS - 1 };
     short row = lobby.row;
     if (!row_mutable(row)) return;
+    /* port: no ordinary lobby admission until real flag/scoring gates pass. */
+    if (!config_boolean("bots.ctf")) maximum[1] = 1;
     if (row == 2 || row == 3)
     {
         if (row == 2 && !lobby.values[1]) return;
@@ -143,6 +150,11 @@ static boolean start_match(void)
     struct game_variant variant;
     struct game_variant_options options;
     char path[128], build[32];
+    if (lobby.values[1] == 2 && !config_boolean("bots.ctf"))
+    {
+        snprintf(lobby.status, sizeof(lobby.status), "Experimental CTF is disabled.");
+        return FALSE;
+    }
     if (!lobby.values[2] && !lobby.values[3])
     {
         snprintf(lobby.status, sizeof(lobby.status), "Add at least one bot.");
@@ -160,7 +172,7 @@ static boolean start_match(void)
         snprintf(lobby.status, sizeof(lobby.status), "Invalid bot match settings.");
         return FALSE;
     }
-    game_engine_get_variant_by_name(&variant, lobby.values[1] ? "team_slayer" : "slayer");
+    game_engine_get_variant_by_name(&variant, variants[lobby.values[1]]);
     game_variant_options_default(&variant, &options);
     options.auto_team_balance = FALSE;
     if (lobby.values[5])
@@ -285,7 +297,7 @@ static char const *value_text(short row, char *text, size_t size)
     switch (row)
     {
     case 0: return maps[value][1];
-    case 1: return value ? "Team Slayer" : "FFA Slayer";
+    case 1: return modes[value];
     case 4: return skills[value];
     case 5: return value ? "Custom" : "Map default";
     case 6: case 7: return weapons[value];
@@ -384,7 +396,7 @@ static void draw_preview(void)
     ui_overlay_outline(LIST_X, DETAIL_Y, LIST_WIDTH, 97, 6, 1, COLOR_PANEL_EDGE);
     draw_map();
     ui_overlay_text(UI_FONT_BOLD, 13, 155, DETAIL_Y + 11, UI_ALIGN_LEFT, COLOR_TEXT, maps[lobby.values[0]][1]);
-    snprintf(text, sizeof(text), "%s - %s", lobby.values[1] ? "Team Slayer" : "FFA Slayer", skills[lobby.values[4]]);
+    snprintf(text, sizeof(text), "%s - %s", modes[lobby.values[1]], skills[lobby.values[4]]);
     ui_overlay_text(UI_FONT_REGULAR, 10, 155, DETAIL_Y + 32, UI_ALIGN_LEFT, COLOR_LABEL, text);
     snprintf(text, sizeof(text), "You + %d bots", lobby.values[2] + lobby.values[3]);
     ui_overlay_text(UI_FONT_REGULAR, 10, 155, DETAIL_Y + 49, UI_ALIGN_LEFT, COLOR_TEXT, text);

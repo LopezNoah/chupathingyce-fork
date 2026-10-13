@@ -27,11 +27,16 @@ state and never sent to another machine.
 #include "engine_ai/claims.h"
 #include "bot_manager.h"
 #include "human_callouts.h" /* port: implicit local-human team awareness */
+#include "halo_bot_objectives.h" /* port: game-owned copied flag state */
+int config_boolean(char const *name);
 
 /* port/linux/src/platform.h's */
 void platform_log(char const *format, ...);
 
 #ifdef HALO_FEATURE_BOTS
+
+/* At most four duties per team; publication cannot exhaust the goal table. */
+typedef char bot_manager_ctf_goals_fit[BOT_AMBITIONS_MAXIMUM >= 4 * HALO_BOT_CTF_TEAMS ? 1 : -1];
 
 /* ---------- structures */
 
@@ -51,6 +56,9 @@ static struct
 	struct bot_ambition ambitions[BOT_AMBITIONS_MAXIMUM];
 	struct bot_sighting sightings[BOT_MANAGER_TEAMS][HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
 	struct engine_ai_claims item_claims;
+	/* port: transition-only evidence of actual engine ownership and scoring. */
+	boolean ctf_observed;
+	struct halo_bot_ctf_snapshot ctf_previous;
 } bot_manager_globals;
 
 /* ---------- private prototypes */
@@ -275,12 +283,117 @@ void bot_manager_release_bot(
 		(uint32_t)bot_number);
 }
 
+/* port: Goals are rebuilt every tick, but identity is kind/team/salted datum,
+not their current array offset. Losing a claim leaves another bot free to act. */
+boolean bot_manager_ctf_goal(long team_index, long player_index, short bot_number,
+	long unavailable_object_index, struct bot_ambition *goal)
+{
+	short index;
+	struct bot_ambition const *best = NULL;
+	if (!goal || team_index < 0 || team_index >= BOT_MANAGER_TEAMS ||
+		player_index == NONE || bot_number <= 0) return FALSE;
+	for (index = 0; index < bot_manager_globals.ambition_count; index++)
+	{
+		struct bot_ambition const *candidate = &bot_manager_globals.ambitions[index];
+		if (!bot_manager_ambition_allowed(candidate, team_index)) continue;
+		if (candidate->kind == _bot_ambition_deliver &&
+			candidate->carrier_player_index != player_index) continue;
+		if ((candidate->kind == _bot_ambition_take || candidate->kind == _bot_ambition_return) &&
+			(candidate->object_index == unavailable_object_index ||
+			bot_manager_item_claimed_by_other(team_index, candidate->object_index, bot_number))) continue;
+		if (!best || candidate->value > best->value) best = candidate;
+	}
+	if (!best) return FALSE;
+	if ((best->kind == _bot_ambition_take || best->kind == _bot_ambition_return) &&
+		!bot_manager_claim_item(team_index, best->object_index, bot_number, 4 * TICKS_PER_SECOND))
+		return FALSE;
+	*goal = *best;
+	return TRUE;
+}
+
 /* ---------- private code: the game modes' adapters */
 
-/* Slayer scores by kills alone: no ambitions. The objective modes' adapters
-(capture the flag, oddball, king of the hill, race) come with read-only
-accessors for their game engines' state; until then those modes keep bots out
-(bots_host_may_have_bots). */
+/* port: Two teams publish at most four goals each, below the fixed capacity. */
+typedef char bot_ctf_goal_capacity_check[BOT_AMBITIONS_MAXIMUM >= 4 * HALO_BOT_CTF_TEAMS ? 1 : -1];
+
+static void bot_manager_ctf_add(short kind, short team, struct halo_bot_ctf_flag const *flag,
+	real_point3d const *position, real radius, real value, long carrier)
+{
+	struct bot_ambition *goal;
+	assert(bot_manager_globals.ambition_count < BOT_AMBITIONS_MAXIMUM);
+	assert(team >= 0 && team < HALO_BOT_CTF_TEAMS);
+	goal = &bot_manager_globals.ambitions[bot_manager_globals.ambition_count++];
+	csmemset(goal, 0, sizeof(*goal));
+	goal->kind = kind;
+	goal->owner_team_index = kind == _bot_ambition_take || kind == _bot_ambition_deliver ? 1 - team : team;
+	goal->acting_team_index = team;
+	goal->team_mask = 1UL << team;
+	goal->object_index = flag ? flag->object_index : NONE;
+	goal->carrier_player_index = carrier;
+	goal->position = *position;
+	goal->radius = radius;
+	goal->value = value;
+}
+
+/* port: Two flags, at most six transition logs per tick; no carrier positions. */
+static void bot_manager_ctf_observe(struct halo_bot_ctf_snapshot const *snapshot)
+{
+	short team;
+	for (team = 0; team < HALO_BOT_CTF_TEAMS; team++)
+	{
+		struct halo_bot_ctf_flag const *flag = &snapshot->flags[team];
+		struct halo_bot_ctf_flag const *previous = &bot_manager_globals.ctf_previous.flags[team];
+		if (!bot_manager_globals.ctf_observed || flag->state != previous->state ||
+			flag->object_index != previous->object_index ||
+			flag->carrier_player_index != previous->carrier_player_index)
+			platform_log("bots: CTF flag %d state %d carrier %ld", team, flag->state, flag->carrier_player_index);
+		if (bot_manager_globals.ctf_observed &&
+			snapshot->scores[team] > bot_manager_globals.ctf_previous.scores[team])
+			platform_log("bots: CTF team %d captures %ld", team, snapshot->scores[team]);
+		/* Event counters wrap; 255 identifies the engine's automatic return. */
+		if (bot_manager_globals.ctf_observed && snapshot->returners[team] != 255 &&
+			snapshot->return_events[team] != bot_manager_globals.ctf_previous.return_events[team])
+			platform_log("bots: CTF team %d touch return player-slot %u", team,
+				(unsigned int)snapshot->returners[team]);
+	}
+	bot_manager_globals.ctf_previous = *snapshot;
+	bot_manager_globals.ctf_observed = TRUE;
+}
+
+static void bot_manager_publish_ctf(void)
+{
+	struct halo_bot_ctf_snapshot snapshot;
+	short team;
+	if (!game_engine_ctf_bot_snapshot(&snapshot)) return;
+	bot_manager_ctf_observe(&snapshot);
+	if (!snapshot.can_score) return;
+	for (team = 0; team < HALO_BOT_CTF_TEAMS; team++)
+	{
+		struct halo_bot_ctf_flag const *own = &snapshot.flags[team];
+		struct halo_bot_ctf_flag const *enemy = &snapshot.flags[1 - team];
+		/* A carrier waits at the stand if the own flag must be returned first.
+		   The game's actual player-update predicate, not the bot, awards score. */
+		if (enemy->state == _halo_bot_flag_carried)
+			bot_manager_ctf_add(_bot_ambition_deliver, team, enemy, &own->stand,
+				0.55f, 1.f, enemy->carrier_player_index);
+		/* Search the enemy's public scoring stand when our flag is carried.
+		   This breaks a two-carrier stalemate without reading hidden positions;
+		   actual engagement still requires ordinary perception. */
+		if (own->state == _halo_bot_flag_carried)
+			bot_manager_ctf_add(_bot_ambition_hunt, team, own, &enemy->stand,
+				1.5f, 0.985f, own->carrier_player_index);
+		if (own->state == _halo_bot_flag_dropped)
+			bot_manager_ctf_add(_bot_ambition_return, team, own, &own->position,
+				0.45f, 0.99f, NONE);
+		if (enemy->state == _halo_bot_flag_home || enemy->state == _halo_bot_flag_dropped)
+			bot_manager_ctf_add(_bot_ambition_take, team, enemy, &enemy->position,
+				0.45f, 0.97f, NONE);
+		bot_manager_ctf_add(_bot_ambition_guard, team, NULL, &own->stand, 3.f, 0.65f, NONE);
+	}
+}
+
+/* port: Standard CTF reads the engine's state. Other objective modes keep
+bots out until their rules and execution have adapters of their own. */
 static void bot_manager_publish_ambitions(
 	void)
 {
@@ -289,6 +402,9 @@ static void bot_manager_publish_ambitions(
 		return;
 	switch (game_engine_get_variant()->game_engine_index)
 	{
+	case game_engine_ctf:
+		if (config_boolean("bots.ctf")) bot_manager_publish_ctf();
+		break;
 	case game_engine_slayer:
 	default:
 		break;

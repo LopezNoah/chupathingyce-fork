@@ -627,7 +627,10 @@ static enum bot_navigation_result bot_nav_route_step(
 	agent->patrol_goal = patrol;
 	if (patrol)
 		agent->goal = goal;
-	if (!patrol && bot_nav_horizontal_distance(origin, goal) <= arrival_distance)
+	/* A flag/item directly below a roof is not reached from that roof.
+	   Match the follower's floor tolerance before accepting XY proximity. */
+	if (!patrol && bot_nav_horizontal_distance(origin, goal) <= arrival_distance &&
+		bot_nav_abs(origin.z - goal.z) < 0.35f)
 	{
 		bot_navigation_agent_reset_path(agent);
 		return BOT_NAVIGATION_ARRIVED;

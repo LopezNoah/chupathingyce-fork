@@ -44,6 +44,7 @@ struct player_datum { long unit_index,team_index; };
 struct bot_skill { real sight_range,field_of_view_degrees; boolean shares_sightings;
     real turn_degrees_per_second,moving_turn_scale; };
 static struct { struct bot_skill *skill; } bots_globals;
+struct sn_point { real x,y,z; };
 struct bot {
     long unit_index,player_index,target_player_index,target_last_seen_time,target_first_seen_time;
     long target_observed_player_index,target_observed_time;
@@ -52,8 +53,9 @@ struct bot {
     boolean target_visible;
     real_euler_angles2d facing;
     real_point3d target_last_position,target_observed_position;
-    boolean moved_last_tick;
-    struct { boolean searching,following; } navigation_agent;
+    boolean moved_last_tick,objective_waiting;
+    struct { boolean searching,following; unsigned int waypoint;
+        struct { unsigned int count; struct sn_point points[2]; } route; } navigation_agent;
     long movement_check_time,movement_escape_until;
     real movement_escape_yaw;
     real_point3d movement_position;
@@ -156,6 +158,7 @@ static short collision_move_pill(int flags,const real_point3d *base,const real_v
     if (mode==2) clear=FALSE; /* boxed in */
     if (mode==3) clear=radius<0.31f; /* narrow passage */
     if (mode==4) clear=fabsf(yaw)<0.1f ? radius<0.35f : yaw>0.7f;
+    if (mode==6) clear=delta->i<=0.51f; /* wall immediately beyond waypoint */
     *clipped=*base;
     if (clear) { clipped->x+=delta->i; clipped->y+=delta->j; clipped->z+=delta->k; }
     *velocity=*delta; return clear ? 0 : 1;
@@ -231,7 +234,16 @@ static void steering_tests(void) {
     assert(b.pending.move_speed==0.45f && observed_margin<0.001f && sweeps<=16);
     mode=4; sweeps=0; b.pending.move_yaw=0.f;
     bot_steer_movement(&b);
-    assert(b.pending.move_yaw>0.7f); /* normal prefers extra clearance */
+    assert(b.pending.move_yaw>0.7f); /* free steering prefers extra clearance */
+    b.navigation_agent.following=TRUE; b.pending.move_yaw=0.f; sweeps=0;
+    bot_steer_movement(&b);
+    assert(b.pending.move_yaw==0.f && observed_margin<0.001f && sweeps==1);
+    mode=6; b.navigation_agent.route.count=2; b.navigation_agent.waypoint=1;
+    b.navigation_agent.route.points[1].x=positions[0].x+0.5f;
+    b.navigation_agent.route.points[1].y=positions[0].y;
+    b.pending.move_yaw=0.f; sweeps=0; bot_steer_movement(&b);
+    assert(b.pending.move_yaw==0.f && sweeps==1);
+    b.navigation_agent.following=FALSE; mode=4;
     b.chosen_leaf=_bot_leaf_retreat; b.pending.move_yaw=0.f; sweeps=0;
     bot_steer_movement(&b);
     assert(b.pending.move_yaw==0.f && sweeps==1); /* retreat accepts tighter gap */

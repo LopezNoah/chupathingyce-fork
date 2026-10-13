@@ -9,6 +9,10 @@ written grouped by section. */
 		"host by yourself: a custom game nobody else is in. Bots never join a game\n"
 		"another machine is in. They play as players do, with the same weapons,\n"
 		"health and rules; experimental." },
+	{ "bots.ctf", _config_boolean, "false", "HALO_BOT_CTF", _environment_value, _platform_all,
+		"Opt-in experimental standard two-flag CTF objectives and lobby mode.\n"
+		"Pickup, return and scoring checked on Blood Gulch and Battle Creek; off by default.\n"
+		"No Assault, single-flag or manual-reset variants (docs/bot-objective-modes.md)." },
 	{ "bots.skill", _config_string, "\"marine\"", "HALO_BOT_SKILL", _environment_value, _platform_all,
 		"How well the bots play: \"recruit\", \"marine\", \"odst\" or \"spartan\".\n"
 		"Skill changes their reactions, aim and sight, never their health or damage." },

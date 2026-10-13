@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 NAMES = ["bot_lane_near", "bot_lane_near_unit", "bot_blast_reaches", "bot_trigger_spread", "bot_attack_safe",
-         "bot_control_grenade",
+         "bot_carries_flag", "bot_control_grenade",
          "bot_other_weapon_slot", "bot_hold_fire", "bot_control_weapon"]
 
 

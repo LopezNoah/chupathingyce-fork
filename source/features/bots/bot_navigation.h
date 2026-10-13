@@ -100,7 +100,8 @@ void bot_navigation_agent_reset_path(
 	struct bot_navigation_agent *agent);
 
 /* Route to a tactical goal using the map's BSP walkable surfaces and live biped
- * capsule checks. ARRIVED means within arrival_distance; WAITING while the
+ * capsule checks. ARRIVED means within arrival_distance horizontally and
+ * 0.35 m of the goal's floor height; WAITING while the
  * search is queued or under way. A queued search follows a moving target; one
  * under way, or a route, replans when the target is 12 metres from its goal. */
 enum bot_navigation_result bot_navigation_agent_move_to(

@@ -40,7 +40,7 @@ struct weapon_trigger_definition { real charging_time; short rounds_per_shot,mag
         projectile_error_angle_upper_bound,projectile_distribution_angle; };
 struct weapon_definition { struct { struct tag_block triggers; } weapon; };
 struct weapon_magazine { short rounds_loaded,rounds_total; };
-struct weapon_datum { long definition_index; struct { struct weapon_magazine magazines[2]; } weapon; };
+struct weapon_datum { long definition_index; boolean flag; struct { struct weapon_magazine magazines[2]; } weapon; };
 struct unit_datum {
     long definition_index;
     struct { short type; long parent_object_index; real_point3d bounding_sphere_center;
@@ -127,6 +127,7 @@ static void *data_iterator_next(struct data_iterator *iterator) {
 static struct weapon_datum *weapon_try_and_get(long index) {
     return index>=0 && index<2 ? &weapons[index] : NULL;
 }
+static boolean weapon_is_flag(long index) { assert(index>=0 && index<2); return weapons[index].flag; }
 static struct weapon_definition *weapon_definition_get(long index) { (void)index; return &weapon_definition; }
 static struct unit_datum *vehicle_try_and_get(long index) {
     return index>=0 && index<UNITS && units[index].object.type==_object_type_vehicle ? &units[index] : NULL;
@@ -389,6 +390,12 @@ static void weapon_tests(void) {
     place(1,10.f,0.f,0); bot.fire_control.pressed=TRUE;
     reset_action(&action); bot_control_weapon(&bot,&action);
     assert(action.primary_trigger==1.f && action.desired_weapon_index==NONE);
+    /* A flag in either slot blocks stale firing and automatic gun selection. */
+    bot=armed(FALSE); weapons[1].flag=TRUE; bot.charging=TRUE; bot.fire_control.pressed=TRUE;
+    reset_action(&action); bot_control_weapon(&bot,&action);
+    assert(action.desired_weapon_index==NONE && action.primary_trigger==0.f && !fired);
+    assert(!bot.charging && !bot.fire_control.pressed && bot.pending.trigger==0.f);
+    weapons[1].flag=FALSE;
 }
 
 int main(void) {

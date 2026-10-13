@@ -86,6 +86,7 @@ Configuration (port/linux/src/port_config.c): bots.count (0..31), bots.skill.
 #include "items/equipment_definitions.h"
 #include "extensions/extension_api.h"
 #include "bot_manager.h"
+#include "halo_bot_objectives.h" /* port: standard CTF admission and state */
 #include "human_callouts.h" /* port: nearby human incoming-fire cues */
 #include "bot_navigation.h"
 #include "navigation_world.h"
@@ -162,7 +163,8 @@ enum
 	_bot_leaf_roam,
 	_bot_leaf_scavenge,
 	_bot_leaf_vehicle,
-	BOT_BEHAVIOR_COUNT = _bot_leaf_vehicle
+	_bot_leaf_objective, /* port: take, return, deliver or guard a CTF goal */
+	BOT_BEHAVIOR_COUNT = _bot_leaf_objective
 };
 
 /* how a bot knows its target */
@@ -347,6 +349,14 @@ struct bot
 	boolean abs_suppressed; /* a leaf facing what it must (a seat, a pickup) */
 	real confidence;
 	float scores[BOT_BEHAVIOR_COUNT];
+	/* port: copied CTF goal identity, never an ambition table offset. */
+	boolean objective_valid;
+	boolean objective_waiting;
+	struct bot_ambition objective;
+	long objective_deadline;
+	long objective_retry_time;
+	long objective_unreachable_index;
+	short objective_retry_kind;
 
 	/* combat */
 	real_euler_angles2d facing;
@@ -473,19 +483,21 @@ static engine_ai_utility_selector_config const bot_selector_config =
 	0.05f, /* switching margin */
 };
 
-static char const *const bot_leaf_names[] = { "none", "retreat", "fight", "roam", "scavenge", "vehicle" };
+static char const *const bot_leaf_names[] = { "none", "retreat", "fight", "roam", "scavenge", "vehicle", "objective" };
+typedef char bot_leaf_names_check[NUMBEROF(bot_leaf_names) == BOT_BEHAVIOR_COUNT + 1 ? 1 : -1];
 
 /* The utility selector chooses; the tree only runs the chosen leaf (the
 others fail at once) and gives it an intent emitter. The order is the old
 priority order, which no longer matters. */
 static engine_ai_behavior_node const bot_behavior_nodes[] =
 {
-	{ ENGINE_AI_BEHAVIOR_PRIORITY, 1, 5, 0 },
+	{ ENGINE_AI_BEHAVIOR_PRIORITY, 1, 6, 0 },
 	{ ENGINE_AI_BEHAVIOR_LEAF, 0, 0, _bot_leaf_vehicle },
 	{ ENGINE_AI_BEHAVIOR_LEAF, 0, 0, _bot_leaf_retreat },
 	{ ENGINE_AI_BEHAVIOR_LEAF, 0, 0, _bot_leaf_scavenge },
 	{ ENGINE_AI_BEHAVIOR_LEAF, 0, 0, _bot_leaf_fight },
 	{ ENGINE_AI_BEHAVIOR_LEAF, 0, 0, _bot_leaf_roam },
+	{ ENGINE_AI_BEHAVIOR_LEAF, 0, 0, _bot_leaf_objective },
 };
 
 static engine_ai_behavior_definition const bot_behavior =
@@ -570,11 +582,12 @@ void bots_initialize_for_new_map(
 		if (skill_name && !csstrcasecmp(skill_name, bot_skills[skill_index].name))
 			bots_globals.skill = &bot_skills[skill_index];
 	}
-	/* port: consume the lobby override once, and only for local Slayer.
+	/* port: consume the lobby override once for supported local modes.
 	A different next map must not carry these teams into an ordinary host. */
 	lobby_friendly_count = NONE;
 	if (lobby_match.pending && game_connection() == _game_connection_local &&
-		game_engine_get_variant() && game_engine_get_variant()->game_engine_index == game_engine_slayer)
+		game_engine_get_variant() && (game_engine_get_variant()->game_engine_index == game_engine_slayer ||
+		(config_boolean("bots.ctf") && game_engine_ctf_bot_variant_supported(game_engine_get_variant()))))
 	{
 		bots_globals.desired_count = lobby_match.friendly_count + lobby_match.enemy_count;
 		bots_globals.skill = &bot_skills[lobby_match.skill];
@@ -622,6 +635,12 @@ boolean bots_game_had_bots(
 	void)
 {
 	return bots_globals.had_bots;
+}
+
+/* port: the private lobby leaves persistent bots.count unchanged. */
+boolean bots_navigation_requested(void)
+{
+	return bots_globals.desired_count > 0;
 }
 
 boolean bots_player_is_bot(
@@ -1947,6 +1966,108 @@ static boolean bot_opportunity_relevant(struct bot *bot)
 	return distance3d(&origin, &bot->opportunity_position) < 3.f;
 }
 
+/* port: CTF flags force ordinary auto-pickup, including friendly touch-return.
+No special pickup intent, ownership write or score write is necessary. */
+static boolean bot_carries_flag(struct unit_datum const *unit)
+{
+	short slot;
+	if (!unit) return FALSE;
+	for (slot = 0; slot < MAXIMUM_WEAPONS_PER_UNIT; slot++)
+	{
+		long index = unit->unit.weapon_object_indices[slot];
+		if (weapon_try_and_get(index) && weapon_is_flag(index)) return TRUE;
+	}
+	return FALSE;
+}
+
+static void bot_objective_release(struct bot *bot)
+{
+	if (bot->objective_valid && (bot->objective.kind == _bot_ambition_take ||
+		bot->objective.kind == _bot_ambition_return))
+		bot_manager_release_item(bot->objective.acting_team_index,
+			bot->objective.object_index, (short)(bot->slot + 1));
+}
+
+static void bot_update_objective(struct bot *bot, struct player_datum const *player)
+{
+	struct bot_ambition goal;
+	boolean valid;
+	long now = game_time_get();
+	long excluded = now < bot->objective_retry_time ? bot->objective_unreachable_index : NONE;
+	valid = !bots_globals.navigation_only &&
+		game_engine_ctf_bot_variant_supported(game_engine_get_variant()) &&
+		bot_manager_ctf_goal(player->team_index, bot->player_index,
+			(short)(bot->slot + 1), excluded, &goal);
+	if (valid != bot->objective_valid || (valid &&
+		(goal.kind != bot->objective.kind || goal.acting_team_index != bot->objective.acting_team_index ||
+		goal.owner_team_index != bot->objective.owner_team_index ||
+		goal.object_index != bot->objective.object_index ||
+		goal.carrier_player_index != bot->objective.carrier_player_index)))
+	{
+		bot_objective_release(bot);
+		bot_navigation_reset(bot);
+		bot->decide_now = TRUE;
+		bot->objective_deadline = now + 60 * TICKS_PER_SECOND;
+		if (valid)
+			platform_log("bots: bot %d CTF goal %d object %ld", bot->slot + 1, goal.kind, goal.object_index);
+	}
+	bot->objective_valid = valid;
+	if (valid) bot->objective = goal;
+}
+
+static engine_ai_behavior_result bot_leaf_objective(struct bot *bot,
+	struct engine_ai_behavior_intent_emitter *emitter)
+{
+	struct bot_navigation_command command;
+	struct sn_point goal;
+	enum bot_navigation_result result;
+	long now = game_time_get();
+	boolean pickup;
+	if (!bot->objective_valid) return ENGINE_AI_BEHAVIOR_FAILURE;
+	pickup = bot->objective.kind == _bot_ambition_take || bot->objective.kind == _bot_ambition_return;
+	bot->abs_suppressed = bot->objective.kind == _bot_ambition_deliver;
+	/* Backoff belongs to the failed duty, not every subsequent objective.
+	   In particular, a guard or new carrier must not inherit pickup's wait. */
+	if (now < bot->objective_retry_time && !pickup &&
+		bot->objective.kind == bot->objective_retry_kind &&
+		bot->objective.object_index == bot->objective_unreachable_index)
+	{
+		bot->objective_waiting = TRUE;
+		return ENGINE_AI_BEHAVIOR_RUNNING;
+	}
+	goal.x = bot->objective.position.x;
+	goal.y = bot->objective.position.y;
+	goal.z = bot->objective.position.z;
+	result = bot_navigation_agent_move_to(&bot->navigation_agent, bot->unit_index,
+		goal, 1.f, bot->objective.radius, &command);
+	if (result == BOT_NAVIGATION_FAILED || (pickup && now >= bot->objective_deadline))
+	{
+		bot_objective_release(bot);
+		bot->objective_unreachable_index = bot->objective.object_index;
+		bot->objective_retry_kind = bot->objective.kind;
+		/* Pickups yield their claim for 15 s. Carriers/searchers replan after
+		   one second instead of standing helpless through a combat encounter. */
+		bot->objective_retry_time = now + (pickup ? 15 : 1) * TICKS_PER_SECOND;
+		bot_navigation_reset(bot);
+		bot->objective_waiting = TRUE;
+		return ENGINE_AI_BEHAVIOR_RUNNING;
+	}
+	/* Arrival does not complete an objective. Only next tick's engine state
+	   can establish acquisition, friendly return or a scored capture. */
+	bot->objective_waiting = result != BOT_NAVIGATION_MOVING;
+	if (command.jump)
+		engine_ai_behavior_intent_emit(emitter, _bot_intent_jump, BOT_INTENT_SCHEMA, NULL, 0);
+	if (result == BOT_NAVIGATION_MOVING && command.has_move)
+	{
+		real_euler_angles2d look;
+		look.yaw = command.yaw;
+		look.pitch = 0.f;
+		bot_emit_look(emitter, &look);
+		bot_emit_move(emitter, command.yaw, command.speed);
+	}
+	return ENGINE_AI_BEHAVIOR_RUNNING;
+}
+
 static engine_ai_behavior_result bot_leaf_scavenge(struct bot *bot,
 	struct engine_ai_behavior_intent_emitter *emitter)
 {
@@ -2366,6 +2487,7 @@ static engine_ai_behavior_result bot_behavior_tick(
 	case _bot_leaf_roam: result = bot_leaf_roam(bot, emitter); break;
 	case _bot_leaf_scavenge: result = bot_leaf_scavenge(bot, emitter); break;
 	case _bot_leaf_vehicle: result = bot_leaf_vehicle(bot, emitter); break;
+	case _bot_leaf_objective: result = bot_leaf_objective(bot, emitter); break;
 	default: return ENGINE_AI_BEHAVIOR_ERROR;
 	}
 
@@ -2409,6 +2531,7 @@ static boolean bot_leaf_viable(
 	switch (leaf_id)
 	{
 	case _bot_leaf_vehicle: return seated;
+	case _bot_leaf_objective: return !seated && bot->objective_valid;
 	case _bot_leaf_scavenge: return !seated && bot->opportunity_index != NONE && bot_opportunity_relevant(bot);
 	case _bot_leaf_retreat: return !seated && bot->target_player_index != NONE;
 	case _bot_leaf_fight: return !seated && bot->target_player_index != NONE;
@@ -2518,6 +2641,13 @@ static void bot_score_behaviors(
 	}
 
 	bot->scores[_bot_leaf_roam - 1] = tuning->roam;
+	/* port: flag duties beat distractions. Guards can still fight and seek
+	   supplies, but carriers/returners/attackers keep their objective route. */
+	if (bot->objective_valid)
+	{
+		bot->scores[_bot_leaf_objective - 1] = bot->objective.value;
+		if (bot->objective.kind != _bot_ambition_guard) return;
+	}
 	/* (test fixture: lane patrols only, holding fire, so every route can be
 	checked to arrival) */
 	if (bots_globals.navigation_only)
@@ -3001,6 +3131,13 @@ static void bot_control_grenade(struct bot *bot, struct player_action *action)
 {
 	long retry;
 
+	/* port: a carried flag is melee-only; no stale grenade intent survives. */
+	if (bot_carries_flag(bot_living_unit(bot->unit_index)))
+	{
+		action->control_flags &= ~FLAG(_unit_control_throw_grenade_bit);
+		return;
+	}
+
 	if (!TEST_FLAG(action->control_flags, _unit_control_throw_grenade_bit) ||
 		bot_attack_safe(bot, TRUE, BOT_FIRE_LANE_SPREAD))
 		return;
@@ -3112,6 +3249,15 @@ static void bot_control_weapon(struct bot *bot, struct player_action *action)
 
 	if (!unit)
 		return;
+	/* port: a flag must remain readied. Never auto-switch to the other gun,
+	   reload it, or fire a stale trigger while delivering. */
+	if (bot_carries_flag(unit))
+	{
+		bot->pending.trigger = 0.f;
+		csmemset(&bot->fire_control, 0, sizeof(bot->fire_control));
+		bot->charging = FALSE;
+		return;
+	}
 	if (unit->object.parent_object_index != NONE)
 	{
 		struct unit_datum *parent = vehicle_try_and_get(unit->object.parent_object_index);
@@ -3203,6 +3349,13 @@ static void bot_keep_moving(
 
 	if (!unit || unit->object.parent_object_index != NONE)
 		return;
+	/* port: holding a stand or waiting to score is intentional, not a stall. */
+	if (bot->objective_waiting)
+	{
+		bot->movement_check_time = now;
+		bot->movement_escape_until = now;
+		return;
+	}
 	object_get_origin(bot->unit_index, &origin);
 	/* port: queued/shared searches are deliberate waits, not movement stalls. */
 	if (bot->navigation_agent.searching)
@@ -3247,7 +3400,8 @@ laterally for wall clearance, preserving vertical extents on level ground. */
 static boolean bot_movement_heading_clear(
 	struct bot const *bot,
 	real yaw,
-	real clearance)
+	real clearance,
+	real probe_distance)
 {
 	real_point3d base;
 	real_point3d clipped;
@@ -3266,8 +3420,8 @@ static boolean bot_movement_heading_clear(
 	base.z += on_slope ? clearance / normal->k : clearance;
 	height -= 2.f * clearance;
 	radius += clearance;
-	delta.i = cosine(yaw) * 0.65f;
-	delta.j = sine(yaw) * 0.65f;
+	delta.i = cosine(yaw) * probe_distance;
+	delta.j = sine(yaw) * probe_distance;
 	/* port: follow the support plane instead of probing horizontally into
 	the floor of an uphill route. New steps/ledges still belong to physics. */
 	delta.k = on_slope ? -(normal->i * delta.i + normal->j * delta.j) / normal->k : 0.f;
@@ -3290,7 +3444,12 @@ static void bot_steer_movement(
 		1.5707963f, -1.5707963f, 2.3561945f, -2.3561945f, 3.1415927f };
 	struct unit_datum const *unit = bot_living_unit(bot->unit_index);
 	real preferred = bot->pending.move_yaw;
-	real clearance = bot->chosen_leaf == _bot_leaf_retreat ? 0.02f : 0.12f;
+	/* A capsule-checked BSP route may legitimately hug a wall. Inflating the
+	pill first made steering choose a roomy sideways heading and miss the
+	waypoint forever. Physics and the exact live sweep still own clearance. */
+	real clearance = bot->navigation_agent.following ? 0.f :
+		bot->chosen_leaf == _bot_leaf_retreat ? 0.02f : 0.12f;
+	real probe_distance = 0.65f;
 	short pass;
 	short candidate;
 
@@ -3300,13 +3459,27 @@ static void bot_steer_movement(
 	{
 		return;
 	}
+	/* Never test through a wall behind a nearby route waypoint. The biped
+	needs to reach that point, not walk another 0.65 m beyond it. */
+	if (bot->navigation_agent.following &&
+		bot->navigation_agent.waypoint < bot->navigation_agent.route.count)
+	{
+		struct sn_point const *point = &bot->navigation_agent.route.points[bot->navigation_agent.waypoint];
+		real_point3d origin;
+		real_point3d target;
+		object_get_origin(bot->unit_index, &origin);
+		target.x = point->x;
+		target.y = point->y;
+		target.z = point->z;
+		probe_distance = MIN(probe_distance, bot_horizontal_distance(&origin, &target));
+	}
 	for (pass = 0; pass < 2; pass++)
 	{
 		for (candidate = 0; candidate < (short)NUMBEROF(offsets); candidate++)
 		{
 			real yaw = bot_angle_normalize(preferred + offsets[candidate]);
 
-			if (bot_movement_heading_clear(bot, yaw, clearance))
+			if (bot_movement_heading_clear(bot, yaw, clearance, probe_distance))
 			{
 				bot->pending.move_yaw = yaw;
 				return;
@@ -3396,6 +3569,12 @@ static void bot_reset_life(
 	if (bot->behavior.initialized)
 		engine_ai_behavior_cancel(&bot->behavior, &bot_behavior, &callbacks);
 	bot_drop_opportunity(bot, "new life");
+	bot_objective_release(bot); /* port: no objective identity survives a life */
+	bot->objective_valid = FALSE;
+	bot->objective_waiting = FALSE;
+	bot->objective_unreachable_index = NONE;
+	bot->objective_retry_time = 0;
+	bot->objective_retry_kind = _bot_ambition_none;
 	engine_ai_behavior_begin(&bot->behavior, &bot_behavior);
 
 	bot->unit_index = unit_index;
@@ -3661,11 +3840,30 @@ static void bot_think(
 			return;
 		}
 	}
+	/* port: CTF countdown/results never produce combat or recovery movement. */
+	if (game_engine_ctf_bot_variant_supported(game_engine_get_variant()) && !game_engine_can_score())
+	{
+		struct player_action action;
+		csmemset(&action, 0, sizeof(action));
+		action.desired_facing = bot->facing;
+		action.desired_weapon_index = action.desired_grenade_index = action.desired_zoom_level = NONE;
+		update_server_set_player_action(bot->player_index, &action);
+		return;
+	}
+	bot->objective_waiting = FALSE;
 	bot_debug_sandbox(bot);
 	bot_perceive(bot, player, unit);
 	bot_observe_inventory(bot, unit);
-	bot_find_opportunity(bot);
-	bot_maintain_opportunity(bot);
+	bot_update_objective(bot, player);
+	/* port: the first CTF policy is on foot. Do not let a vehicle opportunity
+	   move a defender into the Slayer driving policy with a flag duty held. */
+	if (game_engine_ctf_bot_variant_supported(game_engine_get_variant()))
+		bot_drop_opportunity(bot, "CTF on-foot objective policy");
+	else
+	{
+		bot_find_opportunity(bot);
+		bot_maintain_opportunity(bot);
+	}
 	bot_decide(bot, player, unit);
 
 	actor.index = (uint32_t)DATUM_INDEX_TO_ABSOLUTE_INDEX(bot->player_index);
@@ -3729,9 +3927,10 @@ static boolean bots_host_may_have_bots(
 {
 	long machine_indices[1];
 
-	/* Objective variants need game-owned goal policy, not Slayer roaming. */
+	/* port: only Slayer and standard two-team CTF have goal execution. */
 	if (!game_engine_get_variant() ||
-		game_engine_get_variant()->game_engine_index != game_engine_slayer)
+		(game_engine_get_variant()->game_engine_index != game_engine_slayer &&
+		(!config_boolean("bots.ctf") || !game_engine_ctf_bot_variant_supported(game_engine_get_variant()))))
 	{
 		return FALSE;
 	}

@@ -31,6 +31,9 @@ to the game list or Delta Stats */
 boolean bots_game_had_bots(
 	void);
 
+/* port: effective demand includes a private lobby override, not just config. */
+boolean bots_navigation_requested(void);
+
 /* whether the player is one of this machine's bots */
 boolean bots_player_is_bot(
 	long player_index);

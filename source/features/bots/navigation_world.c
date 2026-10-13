@@ -3,6 +3,7 @@
 #include "cseries.h"
 #include "navigation_world.h"
 #include "players.h"
+#include "bots.h" /* port: effective private-lobby navigation demand */
 #include "game.h"
 #include "scenario/scenario.h"
 #include "structures/structure_bsp_definitions.h"
@@ -269,7 +270,7 @@ void navigation_world_update_for_players(void)
     /* The ordinary bots now use this BSP resource too. Keep it dormant when
      * bots and diagnostics are all off so the default build does no mesh work. */
     if (!config_boolean("debug.nav_probe") && (!dump || !dump[0]) &&
-        config_integer("bots.count") <= 0) return;
+        config_integer("bots.count") <= 0 && !bots_navigation_requested()) return;
     if (network_game_distributed_client() || (game_connection()!=_game_connection_local &&
         game_connection()!=_game_connection_network_server)) return;
     if (world.last_tick==now) return;
