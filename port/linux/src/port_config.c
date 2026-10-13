@@ -948,7 +948,9 @@ static char *config_default_text(void)
 		"# The game writes this file with the defaults when it is missing. A\n"
 		"# setting at its default is commented out (\"# key = value\") and follows\n"
 		"# the default of the version that runs: take out the \"# \" and change the\n"
-		"# value to choose another. Delete the file to go back to the defaults.\n"
+		"# value to choose another. A line starting with # does nothing. The game\n"
+		"# reads this file when it starts: restart it after an edit. Delete the\n"
+		"# file to go back to the defaults.\n"
 		CONFIG_VERSION_TEXT);
 #else
 	config_append(&text,
@@ -957,7 +959,9 @@ static char *config_default_text(void)
 		"# The game writes this file with the defaults when it is missing. A\n"
 		"# setting at its default is commented out (\"# key = value\") and follows\n"
 		"# the default of the version that runs: take out the \"# \" and change the\n"
-		"# value to choose another. Delete the file to go back to the defaults.\n"
+		"# value to choose another. A line starting with # does nothing. The game\n"
+		"# reads this file when it starts: restart it after an edit. Delete the\n"
+		"# file to go back to the defaults.\n"
 		"# Each setting can also be set for one run with the environment variable\n"
 		"# named with it, which wins over this file.\n"
 		CONFIG_VERSION_TEXT);
@@ -1315,6 +1319,64 @@ static int config_datum_is(toml_datum_t datum, enum config_type type, const char
 	return 0;
 }
 
+/* a setting's line the player changed but left commented out, "# key =
+value" with a value other than the default written there: it does nothing,
+which the log says (the file as the game writes it, every line at its
+default, says nothing). A setting given a value elsewhere in the file is
+left alone */
+static void config_report_commented(const char *text, toml_datum_t table)
+{
+	char section[64] = "";
+	const char *line;
+	int line_number = 1;
+
+	for (line = text; *line; line_number++)
+	{
+		const char *end = line + strcspn(line, "\n");
+		const char *next = *end ? end + 1 : end;
+		size_t index;
+
+		for (index = 0; !config_line_section(line, end, section, sizeof(section)) &&
+			index < NUMBER_OF_CONFIG_SETTINGS; index++)
+		{
+			const struct config_setting *setting = &config_settings[index];
+			const char *dot = strchr(setting->name, '.');
+			const char *value;
+			char *probe;
+			size_t probe_size;
+			toml_result_t parsed;
+			int same;
+
+			if (!(setting->platforms & CONFIG_PLATFORM) || !dot ||
+				strncmp(section, setting->name, (size_t)(dot - setting->name)) ||
+				section[dot - setting->name] != 0 || !config_line_commented_key(line, end, dot + 1))
+			{
+				continue;
+			}
+			if (toml_seek(table, setting->name).type != TOML_UNKNOWN)
+				break;
+			/* (the value read as TOML: 1.0 is 1.00) */
+			value = (const char *)memchr(line, '=', (size_t)(end - line)) + 1;
+			probe_size = (size_t)(end - value) + 8;
+			probe = malloc(probe_size);
+			if (!probe)
+				break;
+			snprintf(probe, probe_size, "v = %.*s\n", (int)(end - value), value);
+			parsed = toml_parse(probe, (int)strlen(probe));
+			same = parsed.ok && config_datum_is(toml_seek(parsed.toptab, "v"), setting->type, setting->default_value);
+			toml_free(parsed);
+			free(probe);
+			if (!same)
+			{
+				platform_log("config.toml line %d: %s is commented out, so it does nothing; remove the '# ' to use it",
+					line_number, setting->name);
+			}
+			break;
+		}
+		line = next;
+	}
+}
+
 /* a file from before config_version (text, parsed as table) wrote every
 setting at the default of the version that wrote it, so that a default
 changed since never reached it: its lines holding this version's default or
@@ -1516,6 +1578,7 @@ static void config_load(void)
 			config_report_unknown_keys(result.toptab);
 			platform_log("settings: %s", path);
 			completed = config_add_missing(text, result.toptab);
+			config_report_commented(completed ? completed : text, result.toptab);
 			if ((completed || updated) && !config_write_file(path, completed ? completed : text))
 				platform_log("settings: cannot write %s", path);
 			free(completed);
