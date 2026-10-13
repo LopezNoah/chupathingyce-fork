@@ -24,6 +24,9 @@ edits and comments stay.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 /* ---------- the settings */
 
@@ -1637,6 +1640,66 @@ static int config_skip_line(char *text, int line_number, const char *message)
 	return 1;
 }
 
+#ifndef HALO_ANDROID
+/* a config.toml the game never reads, likely edited in its place: said in
+the log, with the one it reads (path) */
+static void config_report_unread(const char *path)
+{
+	char other[1100];
+#ifdef __APPLE__
+	/* beside the application, or in it (the game's is in Application
+	Support) */
+	const char *base = SDL_GetBasePath();
+	const char *bundle = base ? strstr(base, ".app/Contents/") : NULL;
+
+	if (bundle)
+	{
+		const char *folder_end = bundle;
+
+		while (folder_end > base && folder_end[-1] != '/')
+			folder_end--;
+		snprintf(other, sizeof(other), "%sconfig.toml", base);
+		if (SDL_GetPathInfo(other, NULL))
+			platform_log("settings: %s is not read; the game's settings are %s", other, path);
+		snprintf(other, sizeof(other), "%.*sconfig.toml", (int)(folder_end - base), base);
+		if (SDL_GetPathInfo(other, NULL))
+			platform_log("settings: %s is not read; the game's settings are %s", other, path);
+	}
+#elif !defined(_WIN32)
+	/* in the folder the game was started from, when that is not the
+	executable's (the game's is beside the executable) */
+	char folder[1024];
+
+	if (getcwd(folder, sizeof(folder)))
+	{
+		snprintf(other, sizeof(other), "%s/config.toml", folder);
+		if (strcmp(other, path) && SDL_GetPathInfo(other, NULL))
+		{
+			SDL_PathInfo mine, theirs;
+
+			/* (the same file by another name is the one read) */
+			if (!SDL_GetPathInfo(path, &mine) || !SDL_GetPathInfo(other, &theirs) ||
+				mine.size != theirs.size || mine.modify_time != theirs.modify_time)
+			{
+				platform_log("settings: %s is not read; the game's settings are %s", other, path);
+			}
+		}
+	}
+#endif
+	/* the file saved with .txt after it, by an editor that adds it (and
+	Windows Explorer hides it) */
+	snprintf(other, sizeof(other), "%s.txt", path);
+	if (SDL_GetPathInfo(other, NULL))
+	{
+#ifdef _WIN32
+		platform_log("settings: %s is not read: Windows saved it as config.toml.txt; rename it to config.toml", other);
+#else
+		platform_log("settings: %s is not read; rename it to config.toml", other);
+#endif
+	}
+}
+#endif
+
 static void config_load(void)
 {
 	char path[1024];
@@ -1662,28 +1725,8 @@ static void config_load(void)
 	}
 
 	config_path(path, sizeof(path));
-#ifdef __APPLE__
-	{
-		/* a config.toml beside the application, or in it, which the game never
-		reads (its is in Application Support): said, for whoever edits it */
-		const char *base = SDL_GetBasePath();
-		const char *bundle = base ? strstr(base, ".app/Contents/") : NULL;
-
-		if (bundle)
-		{
-			const char *folder_end = bundle;
-			char other[1024];
-
-			while (folder_end > base && folder_end[-1] != '/')
-				folder_end--;
-			snprintf(other, sizeof(other), "%sconfig.toml", base);
-			if (SDL_GetPathInfo(other, NULL))
-				platform_log("settings: %s is not read; the game's settings are %s", other, path);
-			snprintf(other, sizeof(other), "%.*sconfig.toml", (int)(folder_end - base), base);
-			if (SDL_GetPathInfo(other, NULL))
-				platform_log("settings: %s is not read; the game's settings are %s", other, path);
-		}
-	}
+#ifndef HALO_ANDROID
+	config_report_unread(path);
 #endif
 	text = config_read_file(path, &size);
 	if (text)
