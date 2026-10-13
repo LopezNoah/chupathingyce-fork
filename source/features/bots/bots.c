@@ -89,6 +89,7 @@ Configuration (port/linux/src/port_config.c): bots.count (0..31), bots.skill.
 #include "halo_bot_objectives.h" /* port: standard CTF admission and state */
 #include "human_callouts.h" /* port: nearby human incoming-fire cues */
 #include "bot_navigation.h"
+#include "vehicle_navigation.h" /* port: routes for driven vehicles */
 #include "navigation_world.h"
 #include "map_anchors.h"
 
@@ -140,8 +141,28 @@ enum
 	BOT_ITEM_SIGHT_CHECKS = 12,
 	BOT_ITEM_CLAIM_TICKS = 4 * TICKS_PER_SECOND,
 	BOT_VEHICLE_SEEK_RANGE = 35,
-	BOT_VEHICLE_PICKUP_RANGE = 60,
-	BOT_VEHICLE_PICKUP_SCAN_TICKS = TICKS_PER_SECOND,
+	/* port: a seat's claim is renewed each tick while the bot heads for it */
+	BOT_SEAT_CLAIM_TICKS = 2 * TICKS_PER_SECOND,
+	/* a new driver waits this long at most for teammates boarding */
+	BOT_VEHICLE_BOARD_WAIT_TICKS = 8 * TICKS_PER_SECOND,
+	/* a driver with nobody to chase heads for open ground between the
+	bases, and chooses another place after this long */
+	BOT_VEHICLE_FIELD_GOAL_TICKS = 25 * TICKS_PER_SECOND,
+	/* the nearest walkable places to a chosen point of the field, of which
+	the first under open sky is driven to */
+	BOT_VEHICLE_FIELD_CANDIDATES = 8,
+	/* port: a driver looks for teammates to pick up once a second, and
+	offers a ride for this long (a bot that does not get in is not asked
+	again for BOT_RIDE_DECLINED_TICKS) */
+	BOT_RIDE_SCAN_TICKS = TICKS_PER_SECOND,
+	BOT_RIDE_OFFER_TICKS = 15 * TICKS_PER_SECOND,
+	BOT_RIDE_DECLINED_TICKS = 30 * TICKS_PER_SECOND,
+	/* a driver arrived beside its pickup waits this long for them */
+	BOT_RIDE_BOARD_WAIT_TICKS = 6 * TICKS_PER_SECOND,
+	/* drop-off places tried for one objective before the driver walks */
+	BOT_VEHICLE_DROP_OFF_TRIES = 4,
+	/* a target a vehicle could not reach is not chased again until then */
+	BOT_VEHICLE_CHASE_BACKOFF_TICKS = 5 * TICKS_PER_SECOND,
 };
 
 /* the bots' machines stay clear of machine 0 (the host's) and of each other's
@@ -211,6 +232,39 @@ enum
 #define BOT_ATTACKER_AWARENESS_TICKS 15
 #define BOT_GRENADE_COOLDOWN_SECONDS 8.f
 #define BOT_VEHICLE_SEAT_MAXIMUM_SPEED_SQUARED 0.25f
+/* a human teammate this near a bot's vehicle may be getting in */
+#define BOT_VEHICLE_HUMAN_BOARD_DISTANCE 6.f
+/* the height checked above a driving goal for a roof */
+#define BOT_VEHICLE_OPEN_SKY_HEIGHT 20.f
+/* port: the chauffeur's estimate (bot_ride_saving): world units a second
+on foot and driving, the longer way a vehicle goes round, the time to get in */
+#define BOT_RIDE_WALK_SPEED 2.f
+#define BOT_RIDE_DRIVE_SPEED 6.f
+#define BOT_RIDE_DRIVE_DETOUR 1.3f
+#define BOT_RIDE_BOARD_SECONDS 3.f
+/* a pickup is worth it when the rider saves this long, the rider is this
+near, and the driver's own way is this much longer at most */
+#define BOT_RIDE_MINIMUM_SAVING 5.f
+#define BOT_RIDE_PICKUP_RANGE 30.f
+#define BOT_RIDE_MAXIMUM_DETOUR 25.f
+/* a driver stops this near its pickup; a rider gets in within this */
+#define BOT_RIDE_STOP_DISTANCE 4.f
+#define BOT_RIDE_BOARD_DISTANCE 5.f
+/* beyond its nose, the room a vehicle leaves before a teammate on foot */
+#define BOT_VEHICLE_STOPPING_DISTANCE 1.5f
+/* a drop-off is chosen this far short of an objective, toward the vehicle,
+and never nearer it than the clearance */
+#define BOT_VEHICLE_DROP_OFF_BACK 8.f
+#define BOT_VEHICLE_DROP_OFF_CLEARANCE 5.f
+/* riders and drivers get out this near their objective */
+#define BOT_VEHICLE_DISMOUNT_DISTANCE 6.f
+/* CTF: an objective this far away is worth a vehicle */
+#define BOT_CTF_DRIVE_DISTANCE 35.f
+/* how far either way of its spawn facing a new bot looks about */
+#define BOT_ORIENT_SWEEP_DEGREES 50.f
+/* port: a starting location in the enemy's half of the map, rated as a
+last resort: only when every one in the player's own half is refused */
+#define BOT_ENEMY_HALF_SPAWN_RATING 0.01f
 /* a target seen a moment ago that reappears this far away has teleported */
 #define BOT_TELEPORT_DISTANCE 6.f
 #define BOT_ITEM_NEAR_DISTANCE 4.f
@@ -252,6 +306,9 @@ struct bot_skill
 	real moving_aim_penalty;
 	real moving_turn_scale; /* turning while moving: below 1 struggles */
 	boolean crouches;
+	/* port: after spawning, at least this long (up to 1.6 times it) getting
+	its bearings before it notices enemies */
+	real orient_seconds;
 };
 
 /* The utility tuning (docs/bot_decisions.md, "Scores"): fixed values,
@@ -329,6 +386,12 @@ struct bot
 	struct engine_ai_intent_report report;
 
 	/* perception */
+	/* port: a new life's bearings: until aware_time the bot looks about
+	(bot_orient) and notices no enemy it has not been hurt by */
+	long aware_time;
+	long orient_start_time;
+	real orient_yaw;
+	real orient_direction;
 	long target_player_index;
 	boolean target_visible;
 	long target_first_seen_time;
@@ -422,10 +485,36 @@ struct bot
 	long observed_vehicle_index;
 	long observed_weapons[MAXIMUM_WEAPONS_PER_UNIT];
 	long vehicle_progress_time;
-	long vehicle_callout_time;
-	long vehicle_pickup_scan_time;
-	long vehicle_pickup_player_index;
 	real_point3d vehicle_progress_position;
+	/* port: a driver waits for boarding teammates until then (NONE: not set
+	for this seat), and drives to a place in the field */
+	long vehicle_wait_until;
+	boolean vehicle_wait_logged;
+	boolean vehicle_goal_valid;
+	long vehicle_goal_time;
+	real_point3d vehicle_goal;
+	/* port: the chauffeur. A driver's pickup (a teammate's player, NONE), until
+	when it is offered, and who declined last; a rider's offered vehicle. */
+	long pickup_player_index;
+	long pickup_until;
+	boolean pickup_meet; /* no way to them by vehicle: they walk to it */
+	/* port: where the driver stops for its objective, and the places tried */
+	boolean vehicle_drop_off_valid;
+	real_point3d vehicle_drop_off;
+	real_point3d vehicle_drop_off_objective;
+	uint32_t vehicle_drop_off_polygon;
+	uint32_t vehicle_drop_off_failed[BOT_VEHICLE_DROP_OFF_TRIES];
+	short vehicle_drop_off_failures;
+	/* port: cached drivable target approach and failed-chase backoff */
+	boolean vehicle_chase_valid;
+	real_point3d vehicle_chase;
+	real_point3d vehicle_chase_target;
+	long vehicle_chase_blocked_until;
+	long pickup_scan_time;
+	long pickup_declined_player_index;
+	long pickup_declined_until;
+	long ride_vehicle_index;
+	long ride_until;
 
 	struct bot_pending_action pending;
 };
@@ -444,15 +533,15 @@ struct bot_navigation
 static struct bot_skill const bot_skills[] =
 {
 	/* name, reaction, aim error, turn speed, sight, fov, tolerance, burst, pause, strafe, grenades, retreat, share,
-	fire range, accurate range, settle, moving aim penalty, moving turn scale, crouch */
+	fire range, accurate range, settle, moving aim penalty, moving turn scale, crouch, orient */
 	{ "recruit", 0.9f, 7.f, 200.f, 30.f, 55.f, 10.f, 0.6f, 0.8f, FALSE, FALSE, FALSE, FALSE,
-		16.f, 8.f, 1.2f, 3.f, 0.45f, FALSE },
+		16.f, 8.f, 1.2f, 3.f, 0.45f, FALSE, 1.8f },
 	{ "marine", 0.5f, 4.f, 320.f, 40.f, 65.f, 8.f, 1.0f, 0.5f, TRUE, TRUE, FALSE, FALSE,
-		24.f, 12.f, 0.8f, 1.8f, 0.7f, FALSE },
+		24.f, 12.f, 0.8f, 1.8f, 0.7f, FALSE, 1.4f },
 	{ "odst", 0.3f, 2.5f, 450.f, 50.f, 75.f, 6.f, 1.5f, 0.3f, TRUE, TRUE, TRUE, FALSE,
-		32.f, 16.f, 0.55f, 1.35f, 0.85f, FALSE },
+		32.f, 16.f, 0.55f, 1.35f, 0.85f, FALSE, 1.1f },
 	{ "spartan", 0.18f, 1.5f, 720.f, 60.f, 85.f, 5.f, 1.2f, 0.45f, TRUE, TRUE, TRUE, TRUE,
-		40.f, 22.f, 0.35f, 1.15f, 1.f, TRUE },
+		40.f, 22.f, 0.35f, 1.15f, 1.f, TRUE, 0.8f },
 };
 
 /* Slayer's tuning. Patrol remains a meaningful fallback; a teammate's
@@ -511,6 +600,7 @@ static struct
 {
 	boolean behavior_valid;
 	boolean had_bots;
+	boolean team_spawns; /* port: bots.team_spawns, for this map */
 	boolean sandbox_done;
 	boolean log_decisions;
 	boolean navigation_only;
@@ -531,6 +621,8 @@ static boolean bot_join(struct bot *bot, short bot_index);
 static boolean bot_opportunity_relevant(struct bot *bot);
 static void bot_leave(struct bot *bot);
 static void bot_think(struct bot *bot);
+static void bot_submit_action(struct bot *bot);
+static void bot_drop_opportunity(struct bot *bot, char const *reason);
 
 /* ---------- public code */
 
@@ -568,10 +660,12 @@ void bots_initialize_for_new_map(
 	csmemset(&bots_globals.navigation, 0, sizeof(bots_globals.navigation));
 	/* (the old map's bots' searches go with them) */
 	bot_navigation_reset_all();
+	vehicle_navigation_reset_all();
 	bots_globals.had_bots = FALSE;
 	bots_globals.sandbox_done = FALSE;
 	bots_globals.log_decisions = config_boolean("debug.bot_decisions") != 0;
 	bots_globals.navigation_only = config_boolean("debug.bot_navigation_only") != 0;
+	bots_globals.team_spawns = config_boolean("bots.team_spawns") != 0;
 	bots_globals.tuning = &bot_slayer_tuning;
 	bot_manager_reset();
 	bots_globals.epoch++;
@@ -624,6 +718,7 @@ void bots_update(
 	/* (the shared route searches advance before the bots decide, so that a
 	route found this tick is followed this tick) */
 	bot_navigation_update();
+	vehicle_navigation_update();
 	for (bot_index = 0; bot_index < BOTS_MAXIMUM; bot_index++)
 	{
 		if (bots_globals.bots[bot_index].active)
@@ -1127,6 +1222,8 @@ static void bot_perceive(
 	real_point3d best_position;
 	short attacker_index;
 	boolean shares = bots_globals.skill->shares_sightings;
+	/* port: a bot still getting its bearings (bot_orient) sees nobody yet */
+	boolean orienting = now < bot->aware_time;
 
 	bot->visible_enemy_count = 0;
 	unit_get_camera_position(bot->unit_index, &eye);
@@ -1136,7 +1233,8 @@ static void bot_perceive(
 		real_point3d point;
 		real distance;
 
-		if (!bot_players_are_enemies(player, bot->player_index, other, iterator.datum_index) ||
+		if (orienting ||
+			!bot_players_are_enemies(player, bot->player_index, other, iterator.datum_index) ||
 			!bot_living_unit(other->unit_index))
 		{
 			continue;
@@ -1196,6 +1294,8 @@ static void bot_perceive(
 				continue;
 			}
 			bot_aim_point(attacking_player->unit_index, &bot->target_last_position);
+			/* (being hurt ends getting its bearings at once) */
+			bot->aware_time = now;
 			if (bot->target_player_index != attacker->player_index)
 				bot->target_first_seen_time = now;
 			bot->target_player_index = attacker->player_index;
@@ -1248,7 +1348,8 @@ static void bot_perceive(
 
 	/* (with nobody to fight, where a teammate last saw an enemy: every bot
 	reads the team's sightings, but only skills that share write them) */
-	if (bot->target_player_index == NONE || bot->target_source == _bot_target_shared)
+	if (now >= bot->aware_time &&
+		(bot->target_player_index == NONE || bot->target_source == _bot_target_shared))
 	{
 		real_point3d origin;
 		long shared_index;
@@ -1557,10 +1658,15 @@ static boolean bot_wants_weapon(struct bot *bot, long weapon_index)
 static short bot_vehicle_seat(struct bot *bot, long vehicle_index)
 {
 	struct unit_datum *vehicle = vehicle_try_and_get(vehicle_index);
+	struct player_datum const *player = bot_player(bot);
+	long team_index = player ? player->team_index : NONE;
+	short bot_number = (short)(bot->slot + 1);
 	struct unit_definition *definition;
+	short seat_count;
 	short seat_index;
 	short best = NONE;
 	short best_priority = 0;
+	boolean driver_coming = FALSE;
 
 	if (!vehicle || TEST_FLAG(vehicle->object.damage_flags, _object_dead_bit) ||
 		vehicle->object.up.k < 0.6f ||
@@ -1569,14 +1675,27 @@ static short bot_vehicle_seat(struct bot *bot, long vehicle_index)
 			BOT_VEHICLE_SEAT_MAXIMUM_SPEED_SQUARED)
 		return NONE;
 	definition = unit_definition_get(vehicle->definition_index);
-	for (seat_index = 0; seat_index < MIN(definition->unit.seats.count, 16); seat_index++)
+	seat_count = (short)MIN(definition->unit.seats.count, BOT_MANAGER_SEATS);
+	/* port: a teammate already on the way to the driver's seat lets the others
+	head for the rest; one bot per seat (bot_manager_claim_seat) */
+	for (seat_index = 0; seat_index < seat_count; seat_index++)
+	{
+		struct unit_seat *seat = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats, seat_index, struct unit_seat);
+
+		if (TEST_FLAG(seat->flags, _unit_seat_driver_bit) &&
+			bot_manager_seat_claimed_by_other(team_index, vehicle_index, seat_index, bot_number))
+			driver_coming = TRUE;
+	}
+	for (seat_index = 0; seat_index < seat_count; seat_index++)
 	{
 		struct unit_seat *seat = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats, seat_index, struct unit_seat);
 		long occupant = NONE;
 		short priority = TEST_FLAG(seat->flags, _unit_seat_driver_bit) ? 2 :
 			(TEST_FLAG(seat->flags, _unit_seat_gunner_bit) ? 3 : 1);
-		if (!TEST_FLAG(seat->flags, _unit_seat_driver_bit) &&
+		if (!TEST_FLAG(seat->flags, _unit_seat_driver_bit) && !driver_coming &&
 			vehicle->unit.driver_object_index == NONE && vehicle_supports_bot_driver(vehicle_index))
+			continue;
+		if (bot_manager_seat_claimed_by_other(team_index, vehicle_index, seat_index, bot_number))
 			continue;
 		if (priority > best_priority && unit_can_enter_seat(bot->unit_index, vehicle_index, seat_index, &occupant))
 		{
@@ -1587,64 +1706,43 @@ static short bot_vehicle_seat(struct bot *bot, long vehicle_index)
 	return best;
 }
 
-/* A driver without an enemy to pursue heads for the nearest teammate who
-   can use an empty non-driver seat. Stopping within eight metres lets the
-   teammate's normal seat-entry logic take over. */
-static boolean bot_vehicle_pickup_teammate(
+/* port: a new driver waits, at most BOT_VEHICLE_BOARD_WAIT_TICKS, while a
+   teammate bot is on its way to one of the vehicle's seats or a human
+   teammate on foot stands beside it with a seat open; then it drives. It no
+   longer drives off to fetch teammates, nor waits for a full vehicle. */
+static boolean bot_vehicle_should_wait(
 	struct bot *bot,
-	long vehicle_index,
-	real_point3d *position,
-	long *teammate_player_index)
+	long vehicle_index)
 {
 	struct player_datum *player = bot_player(bot);
 	struct unit_datum *vehicle = vehicle_try_and_get(vehicle_index);
 	struct unit_definition *definition;
 	struct data_iterator iterator;
 	struct player_datum *teammate;
-	real best_distance = (real)BOT_VEHICLE_PICKUP_RANGE;
 	long now = game_time_get();
-	boolean found = FALSE;
 
-	if (!player || !vehicle || !game_engine_has_teams() || !position || !teammate_player_index)
+	if (!player || !vehicle || !game_engine_has_teams() ||
+		bot->vehicle_wait_until == NONE || now >= bot->vehicle_wait_until)
 		return FALSE;
-	if (now < bot->vehicle_pickup_scan_time)
-	{
-		teammate = bot->vehicle_pickup_player_index != NONE ?
-			player_try_and_get(bot->vehicle_pickup_player_index) : NULL;
-		if (teammate && teammate->team_index == player->team_index)
-		{
-			struct unit_datum *teammate_unit = bot_living_unit(teammate->unit_index);
-			if (teammate_unit && teammate_unit->object.parent_object_index == NONE &&
-				distance3d(&vehicle->object.position, &teammate_unit->object.position) <
-					(real)BOT_VEHICLE_PICKUP_RANGE)
-			{
-				*position = teammate_unit->object.position;
-				*teammate_player_index = bot->vehicle_pickup_player_index;
-				return TRUE;
-			}
-		}
-		return FALSE;
-	}
-	bot->vehicle_pickup_scan_time = now + BOT_VEHICLE_PICKUP_SCAN_TICKS + bot->slot;
-	bot->vehicle_pickup_player_index = NONE;
+	if (bot_manager_vehicle_claimed_by_other(player->team_index, vehicle_index, (short)(bot->slot + 1)))
+		return TRUE;
 	definition = unit_definition_get(vehicle->definition_index);
 	data_iterator_new(&iterator, player_data);
+	/* (at most the player table's capacity) */
 	while ((teammate = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
 	{
 		struct unit_datum *teammate_unit;
-		real distance;
 		short seat_index;
-		boolean has_open_seat = FALSE;
 
-		if (iterator.datum_index == bot->player_index || teammate->team_index != player->team_index)
+		if (iterator.datum_index == bot->player_index || teammate->team_index != player->team_index ||
+			bots_player_is_bot(iterator.datum_index))
 			continue;
 		teammate_unit = bot_living_unit(teammate->unit_index);
-		if (!teammate_unit || teammate_unit->object.parent_object_index != NONE)
+		if (!teammate_unit || teammate_unit->object.parent_object_index != NONE ||
+			distance3d(&vehicle->object.position, &teammate_unit->object.position) >
+				BOT_VEHICLE_HUMAN_BOARD_DISTANCE)
 			continue;
-		distance = distance3d(&vehicle->object.position, &teammate_unit->object.position);
-		if (distance >= best_distance)
-			continue;
-		for (seat_index = 0; seat_index < MIN(definition->unit.seats.count, 16); seat_index++)
+		for (seat_index = 0; seat_index < MIN(definition->unit.seats.count, BOT_MANAGER_SEATS); seat_index++)
 		{
 			struct unit_seat *seat = TAG_BLOCK_GET_ELEMENT(
 				&definition->unit.seats, seat_index, struct unit_seat);
@@ -1652,20 +1750,530 @@ static boolean bot_vehicle_pickup_teammate(
 
 			if (!TEST_FLAG(seat->flags, _unit_seat_driver_bit) &&
 				unit_can_enter_seat(teammate->unit_index, vehicle_index, seat_index, &occupant))
-			{
-				has_open_seat = TRUE;
-				break;
-			}
+				return TRUE;
 		}
-		if (!has_open_seat)
-			continue;
-		best_distance = distance;
-		*position = teammate_unit->object.position;
-		*teammate_player_index = iterator.datum_index;
-		bot->vehicle_pickup_player_index = iterator.datum_index;
-		found = TRUE;
 	}
-	return found;
+	return FALSE;
+}
+
+/* ---------- private code: the chauffeur */
+
+/* the active bot playing this player, NULL if none (BOTS_MAXIMUM looked at) */
+static struct bot *bot_from_player(long player_index)
+{
+	short bot_index;
+
+	if (player_index == NONE)
+		return NULL;
+	for (bot_index = 0; bot_index < BOTS_MAXIMUM; bot_index++)
+	{
+		if (bots_globals.bots[bot_index].active && bots_globals.bots[bot_index].player_index == player_index)
+			return &bots_globals.bots[bot_index];
+	}
+	return NULL;
+}
+
+/* port: the seconds a teammate saves by riding rather than walking: walking
+all the way, against waiting for the vehicle to come, getting in, and being
+driven the (longer) way round. Distances are straight lines, as a player
+judges them; negative, or not a number, is no saving. */
+static real bot_ride_saving(
+	real vehicle_to_rider,
+	real rider_to_destination)
+{
+	real walk;
+	real ride;
+
+	if (!(vehicle_to_rider >= 0.f) || !(rider_to_destination >= 0.f))
+		return 0.f;
+	walk = rider_to_destination / BOT_RIDE_WALK_SPEED;
+	ride = (vehicle_to_rider + rider_to_destination * BOT_RIDE_DRIVE_DETOUR) / BOT_RIDE_DRIVE_SPEED +
+		BOT_RIDE_BOARD_SECONDS;
+	return walk - ride;
+}
+
+/* where a bot is going: its objective (CTF), else nowhere it needs a ride to */
+static boolean bot_destination(struct bot const *bot, real_point3d *destination)
+{
+	if (!bot->objective_valid || bot->objective.kind == _bot_ambition_guard)
+		return FALSE;
+	*destination = bot->objective.position;
+	return TRUE;
+}
+
+/* whether a teammate on foot could take one of the vehicle's free seats
+other than the driver's (none claimed by another bot) */
+static boolean bot_ride_seat_open(struct bot *driver, long vehicle_index, long rider_player_index)
+{
+	struct unit_datum *vehicle = vehicle_try_and_get(vehicle_index);
+	struct player_datum *rider = player_try_and_get(rider_player_index);
+	struct player_datum const *player = bot_player(driver);
+	struct unit_definition *definition;
+	short seat_index;
+
+	if (!vehicle || !rider || !player)
+		return FALSE;
+	definition = unit_definition_get(vehicle->definition_index);
+	for (seat_index = 0; seat_index < MIN(definition->unit.seats.count, BOT_MANAGER_SEATS); seat_index++)
+	{
+		struct unit_seat *seat = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats, seat_index, struct unit_seat);
+		long occupant = NONE;
+
+		if (TEST_FLAG(seat->flags, _unit_seat_driver_bit))
+			continue;
+		if (unit_can_enter_seat(rider->unit_index, vehicle_index, seat_index, &occupant) &&
+			!bot_manager_seat_claimed_by_other(player->team_index, vehicle_index, seat_index,
+				(short)(driver->slot + 1)))
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* port: a driver picks up a teammate when the ride is quicker for them than
+walking, as a player driving for the team does (in CTF especially): the
+teammate within BOT_RIDE_PICKUP_RANGE who saves the most time, at least
+BOT_RIDE_MINIMUM_SAVING, for no more than BOT_RIDE_MAXIMUM_DETOUR on the
+driver's own way. A bot rider goes where its objective is; a human's, or a
+bot's with none, is taken to be the driver's destination. Once a second,
+over the player table (its capacity). */
+static void bot_choose_pickup(
+	struct bot *bot,
+	long vehicle_index,
+	real_point3d const *destination)
+{
+	struct player_datum *player = bot_player(bot);
+	struct unit_datum *vehicle = vehicle_try_and_get(vehicle_index);
+	struct data_iterator iterator;
+	struct player_datum *teammate;
+	long now = game_time_get();
+	real best_saving = BOT_RIDE_MINIMUM_SAVING;
+	long best_index = NONE;
+	real driver_direct;
+
+	if (!player || !vehicle || !destination || !game_engine_has_teams() || now < bot->pickup_scan_time)
+		return;
+	bot->pickup_scan_time = now + BOT_RIDE_SCAN_TICKS + bot->slot;
+	driver_direct = bot_horizontal_distance(&vehicle->object.position, destination);
+	data_iterator_new(&iterator, player_data);
+	while ((teammate = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
+	{
+		struct unit_datum *teammate_unit;
+		struct bot *rider;
+		real_point3d rider_destination = *destination;
+		real to_rider;
+		real saving;
+
+		if (iterator.datum_index == bot->player_index || teammate->team_index != player->team_index)
+			continue;
+		if (iterator.datum_index == bot->pickup_declined_player_index && now < bot->pickup_declined_until)
+			continue;
+		teammate_unit = bot_living_unit(teammate->unit_index);
+		if (!teammate_unit || teammate_unit->object.parent_object_index != NONE)
+			continue;
+		rider = bot_from_player(iterator.datum_index);
+		/* (a bot another driver is coming for, or still getting its bearings) */
+		if (rider && ((rider->ride_vehicle_index != NONE && rider->ride_vehicle_index != vehicle_index &&
+			now < rider->ride_until) || now < rider->aware_time))
+			continue;
+		/* (a bot with a duty where it stands, a guard, is not taken away;
+		one with none rides to where the driver goes) */
+		if (rider && rider->objective_valid && !bot_destination(rider, &rider_destination))
+			continue;
+		to_rider = bot_horizontal_distance(&vehicle->object.position, &teammate_unit->object.position);
+		if (to_rider > BOT_RIDE_PICKUP_RANGE ||
+			to_rider + bot_horizontal_distance(&teammate_unit->object.position, destination) - driver_direct >
+				BOT_RIDE_MAXIMUM_DETOUR)
+			continue;
+		saving = bot_ride_saving(to_rider, bot_horizontal_distance(&teammate_unit->object.position,
+			&rider_destination));
+		if (saving <= best_saving || !bot_ride_seat_open(bot, vehicle_index, iterator.datum_index))
+			continue;
+		best_saving = saving;
+		best_index = iterator.datum_index;
+	}
+	if (best_index == NONE || best_index == bot->pickup_player_index)
+		return;
+	bot->pickup_player_index = best_index;
+	bot->pickup_until = now + BOT_RIDE_OFFER_TICKS;
+	bot->pickup_meet = FALSE;
+	{
+		struct bot *rider = bot_from_player(best_index);
+
+		if (rider)
+		{
+			rider->ride_vehicle_index = vehicle_index;
+			rider->ride_until = bot->pickup_until;
+		}
+	}
+	platform_log("bots: bot %d picks up teammate %ld (saves %.0f s)", bot->slot + 1,
+		(long)DATUM_INDEX_TO_ABSOLUTE_INDEX(best_index), best_saving);
+}
+
+/* the driver's pickup, while it is still on foot and the offer stands */
+static struct unit_datum *bot_pickup_unit(struct bot *bot)
+{
+	struct player_datum *rider;
+	struct unit_datum *unit;
+	long now = game_time_get();
+
+	if (bot->pickup_player_index == NONE)
+		return NULL;
+	rider = player_try_and_get(bot->pickup_player_index);
+	unit = rider ? bot_living_unit(rider->unit_index) : NULL;
+	if (now >= bot->pickup_until || !unit || unit->object.parent_object_index != NONE)
+	{
+		/* (got in somewhere, or let the offer go by: not asked again for a while) */
+		if (now >= bot->pickup_until && unit && unit->object.parent_object_index == NONE)
+		{
+			bot->pickup_declined_player_index = bot->pickup_player_index;
+			bot->pickup_declined_until = now + BOT_RIDE_DECLINED_TICKS;
+		}
+		bot->pickup_player_index = NONE;
+		return NULL;
+	}
+	return unit;
+}
+
+/* port: a bot offered a ride waits for it, facing the vehicle; once the
+vehicle has stopped beside it, it takes a free seat (an ordinary vehicle
+opportunity, its seat claimed). It fights whatever it sees meanwhile. TRUE
+while it stands waiting this tick. */
+static boolean bot_await_ride(struct bot *bot, struct unit_datum const *unit)
+{
+	struct unit_datum *vehicle;
+	struct player_datum const *player = bot_player(bot);
+	long now = game_time_get();
+	real distance;
+	short seat;
+
+	if (bot->ride_vehicle_index == NONE)
+		return FALSE;
+	vehicle = vehicle_try_and_get(bot->ride_vehicle_index);
+	if (!vehicle || now >= bot->ride_until || unit->object.parent_object_index != NONE || !player ||
+		TEST_FLAG(vehicle->object.damage_flags, _object_dead_bit) || vehicle->unit.driver_object_index == NONE)
+	{
+		bot->ride_vehicle_index = NONE;
+		return FALSE;
+	}
+	if (bot->target_visible)
+		return FALSE;
+	if (bot->opportunity_index == bot->ride_vehicle_index && bot->opportunity_vehicle)
+		return FALSE;
+	/* (a stopped vehicle with a seat for it: it walks there and gets in;
+	one still coming: it waits) */
+	seat = bot_vehicle_seat(bot, bot->ride_vehicle_index);
+	distance = bot_horizontal_distance(&unit->object.position, &vehicle->object.position);
+	if (seat != NONE && distance <= BOT_RIDE_PICKUP_RANGE)
+	{
+		bot_drop_opportunity(bot, "a ride came");
+		if (!bot_manager_claim_seat(player->team_index, bot->ride_vehicle_index, seat,
+			(short)(bot->slot + 1), BOT_SEAT_CLAIM_TICKS))
+			return FALSE;
+		bot->opportunity_index = bot->ride_vehicle_index;
+		bot->opportunity_team_index = player->team_index;
+		bot->opportunity_vehicle = TRUE;
+		bot->opportunity_powerup = FALSE;
+		bot->opportunity_seat = seat;
+		bot->opportunity_position = vehicle->object.position;
+		bot->opportunity_end_time = now + bot_seconds_to_ticks(10.f);
+		bot->decide_now = TRUE;
+		platform_log("bots: bot %d boards its ride, seat %d", bot->slot + 1, seat);
+		return FALSE;
+	}
+	csmemset(&bot->pending, 0, sizeof(bot->pending));
+	bot->pending.has_look = TRUE;
+	bot->pending.look = bot_angles_to(&unit->object.position, &vehicle->object.position);
+	bot->pending.look.pitch = 0.f;
+	bot->objective_waiting = TRUE; /* (waiting on purpose: not a stall) */
+	bot_submit_action(bot);
+	return TRUE;
+}
+
+/* port: whether a teammate on foot stands in the vehicle's way: within its
+   width (and a margin) ahead of it (behind, backing up), as far as it goes
+   in three quarters of a second plus a stopping distance. A driver brakes
+   for them; it does not run teammates over. Over the player table (its
+   capacity). */
+static boolean bot_vehicle_teammate_ahead(
+	struct bot *bot,
+	struct unit_datum const *vehicle,
+	boolean reversing)
+{
+	struct player_datum const *player = bot_player(bot);
+	struct data_iterator iterator;
+	struct player_datum *teammate;
+	float half_width = 0.64f;
+	float half_length = 1.15f;
+	real speed;
+	real reach;
+	real forward_x;
+	real forward_y;
+	real length;
+
+	if (!player || !game_engine_has_teams())
+		return FALSE;
+	navigation_world_vehicle_body(&half_width, &half_length, NULL);
+	forward_x = vehicle->object.forward.i;
+	forward_y = vehicle->object.forward.j;
+	length = square_root(forward_x * forward_x + forward_y * forward_y);
+	if (!(length > 0.01f))
+		return FALSE;
+	forward_x /= length;
+	forward_y /= length;
+	if (reversing)
+	{
+		forward_x = -forward_x;
+		forward_y = -forward_y;
+	}
+	speed = square_root(magnitude_squared3d(&vehicle->object.translational_velocity));
+	reach = half_length + BOT_VEHICLE_STOPPING_DISTANCE +
+		(valid_real(speed) ? MIN(speed, BOT_MAXIMUM_SPEED_PER_TICK) : 0.f) * TICKS_PER_SECOND * 0.75f;
+	data_iterator_new(&iterator, player_data);
+	while ((teammate = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
+	{
+		struct unit_datum *teammate_unit;
+		real dx;
+		real dy;
+		real along;
+		real across;
+
+		if (iterator.datum_index == bot->player_index || teammate->team_index != player->team_index)
+			continue;
+		teammate_unit = bot_living_unit(teammate->unit_index);
+		if (!teammate_unit || teammate_unit->object.parent_object_index != NONE)
+			continue;
+		dx = teammate_unit->object.position.x - vehicle->object.position.x;
+		dy = teammate_unit->object.position.y - vehicle->object.position.y;
+		along = dx * forward_x + dy * forward_y;
+		across = -dx * forward_y + dy * forward_x;
+		if (along > 0.f && along <= reach && (across < 0.f ? -across : across) <= half_width + 0.5f &&
+			(teammate_unit->object.position.z - vehicle->object.position.z) < 2.f &&
+			(teammate_unit->object.position.z - vehicle->object.position.z) > -2.f)
+			return TRUE;
+	}
+	return FALSE;
+}
+
+/* nothing of the structure overhead: open ground, not a base's rooms */
+static boolean bot_open_sky(
+	real_point3d const *point)
+{
+	real_point3d from = *point;
+	real_point3d to = *point;
+
+	from.z += 0.5f;
+	to.z += BOT_VEHICLE_OPEN_SKY_HEIGHT;
+	return bot_line_clear(FLAG(_collision_test_front_facing_surfaces_bit) |
+		FLAG(_collision_test_back_facing_surfaces_bit) | FLAG(_collision_test_structure_bit),
+		&from, &to, NONE);
+}
+
+/* port: a place a vehicle can be driven to near a point: of the walkable
+   places nearest it (in the vehicle layer's set the vehicle is in, when there
+   is one), the first under open sky and not among the excluded (places a
+   route was not found to), else the nearest not excluded. FALSE if none. */
+static boolean bot_vehicle_place(
+	struct unit_datum const *vehicle,
+	real_point3d const *desired,
+	real_point3d const *avoided,
+	uint32_t const *excluded,
+	short excluded_count,
+	real_point3d *place,
+	uint32_t *place_polygon)
+{
+	struct sn_resource const *resource = navigation_world_vehicle_resource();
+	uint32_t component = SN_NONE;
+	uint32_t candidates[BOT_VEHICLE_FIELD_CANDIDATES];
+	real costs[BOT_VEHICLE_FIELD_CANDIDATES];
+	short candidate_count = 0;
+	short index;
+	uint32_t polygon;
+
+	if (resource)
+	{
+		struct sn_point position;
+
+		position.x = vehicle->object.position.x;
+		position.y = vehicle->object.position.y;
+		position.z = vehicle->object.position.z;
+		component = vehicle_navigation_component(position);
+	}
+	else
+		resource = navigation_world_resource();
+	if (!resource || !valid_real_point3d(desired))
+		return FALSE;
+	/* the nearest standable places, kept sorted (resource->polygon_count, at
+	most SN_POLYGONS_MAX, each tried once) */
+	for (polygon = 0; polygon < resource->polygon_count && polygon < SN_POLYGONS_MAX; polygon++)
+	{
+		struct sn_point center = resource->polygons[polygon].center;
+		real dx = center.x - desired->x;
+		real dy = center.y - desired->y;
+		real dz = center.z - desired->z;
+		/* (another floor counts for more than its height: a base's roof
+		is no way to a flag inside it) */
+		real cost = square_root(dx * dx + dy * dy) + 3.f * (dz < 0.f ? -dz : dz);
+		short at;
+		boolean skip = FALSE;
+
+		if (avoided && square_root((center.x - avoided->x) * (center.x - avoided->x) +
+			(center.y - avoided->y) * (center.y - avoided->y)) < BOT_VEHICLE_DROP_OFF_CLEARANCE)
+			continue;
+
+		if (sn_component(resource, polygon) == SN_NONE ||
+			(component != SN_NONE && sn_component(resource, polygon) != component))
+			continue;
+		/* (inside a building: never a place to drive to, once known) */
+		if (component != SN_NONE && navigation_world_vehicle_open_sky(polygon) == 0)
+			continue;
+		for (index = 0; index < excluded_count; index++)
+			skip |= excluded[index] == polygon;
+		if (skip)
+			continue;
+		if (candidate_count == BOT_VEHICLE_FIELD_CANDIDATES && cost >= costs[candidate_count - 1])
+			continue;
+		at = candidate_count < BOT_VEHICLE_FIELD_CANDIDATES ? candidate_count++ : candidate_count - 1;
+		while (at > 0 && costs[at - 1] > cost)
+		{
+			costs[at] = costs[at - 1];
+			candidates[at] = candidates[at - 1];
+			at--;
+		}
+		costs[at] = cost;
+		candidates[at] = polygon;
+	}
+	if (candidate_count == 0)
+		return FALSE;
+	/* (at most BOT_VEHICLE_FIELD_CANDIDATES rays; the nearest if all are roofed) */
+	polygon = candidates[0];
+	for (index = 0; index < candidate_count; index++)
+	{
+		struct sn_point center = resource->polygons[candidates[index]].center;
+		real_point3d point;
+
+		point.x = center.x;
+		point.y = center.y;
+		point.z = center.z;
+		if (bot_open_sky(&point))
+		{
+			polygon = candidates[index];
+			break;
+		}
+	}
+	place->x = resource->polygons[polygon].center.x;
+	place->y = resource->polygons[polygon].center.y;
+	place->z = resource->polygons[polygon].center.z;
+	*place_polygon = polygon;
+	return TRUE;
+}
+
+/* port: where a driver with nobody to chase goes: a place under open sky
+   between the two bases (the CTF flags, else the team starts), 30 to 75
+   percent of the way from its own, either side of the middle. The spawn
+   graph's random points it used before were mostly in the bases. */
+static boolean bot_vehicle_field_goal(
+	struct bot *bot,
+	struct unit_datum const *vehicle,
+	real_point3d *goal)
+{
+	struct player_datum const *player = bot_player(bot);
+	long now = game_time_get();
+	long team_index;
+	real_point3d home;
+	real_point3d enemy;
+	real_point3d desired;
+	real forward_x;
+	real forward_y;
+	real length;
+	real progress;
+	real lateral;
+	uint32_t polygon;
+
+	if (bot->vehicle_goal_valid && now - bot->vehicle_goal_time < BOT_VEHICLE_FIELD_GOAL_TICKS &&
+		bot_horizontal_distance(&vehicle->object.position, &bot->vehicle_goal) > 10.f)
+	{
+		*goal = bot->vehicle_goal;
+		return TRUE;
+	}
+	bot->vehicle_goal_valid = FALSE;
+	/* (free for all: either team's bases bound the same field) */
+	team_index = player && game_engine_has_teams() ? player->team_index : 0;
+	if (!bot_navigation_team_bases(team_index, &home, &enemy))
+		return FALSE;
+	forward_x = enemy.x - home.x;
+	forward_y = enemy.y - home.y;
+	length = square_root(forward_x * forward_x + forward_y * forward_y);
+	if (!(length >= 10.f))
+		return FALSE;
+	forward_x /= length;
+	forward_y /= length;
+	progress = bot_random_range(bot, 0.3f, 0.75f);
+	lateral = bot_random_range(bot, -0.25f, 0.25f) * length;
+	desired.x = home.x + forward_x * progress * length - forward_y * lateral;
+	desired.y = home.y + forward_y * progress * length + forward_x * lateral;
+	desired.z = home.z + (enemy.z - home.z) * progress;
+	if (!bot_vehicle_place(vehicle, &desired, NULL, NULL, 0, &bot->vehicle_goal, &polygon))
+		return FALSE;
+	bot->vehicle_goal_valid = TRUE;
+	bot->vehicle_goal_time = now;
+	platform_log("bots: bot %d drives to the field at (%.1f %.1f %.1f), %.0f%% of the way to the enemy base",
+		bot->slot + 1, bot->vehicle_goal.x, bot->vehicle_goal.y, bot->vehicle_goal.z, progress * 100.f);
+	*goal = bot->vehicle_goal;
+	return TRUE;
+}
+
+/* port: where a driver taking itself (and its riders) to an objective stops:
+   the drivable place under open sky nearest a point BOT_VEHICLE_DROP_OFF_BACK
+   short of it on the way from the vehicle, no nearer it than
+   BOT_VEHICLE_DROP_OFF_CLEARANCE (a flag in a base is reached on foot from
+   there: the vehicle stays outside). A place no route was found to is not chosen again
+   for this objective; after BOT_VEHICLE_DROP_OFF_TRIES of them, FALSE. */
+static boolean bot_vehicle_drop_off(
+	struct bot *bot,
+	struct unit_datum const *vehicle,
+	real_point3d const *objective,
+	real_point3d *goal)
+{
+	if (bot->vehicle_drop_off_valid &&
+		bot_horizontal_distance(&bot->vehicle_drop_off_objective, objective) <= 5.f)
+	{
+		*goal = bot->vehicle_drop_off;
+		return TRUE;
+	}
+	if (bot_horizontal_distance(&bot->vehicle_drop_off_objective, objective) > 5.f)
+		bot->vehicle_drop_off_failures = 0;
+	bot->vehicle_drop_off_valid = FALSE;
+	bot->vehicle_drop_off_objective = *objective;
+	{
+		real_point3d desired = *objective;
+		real dx = vehicle->object.position.x - objective->x;
+		real dy = vehicle->object.position.y - objective->y;
+		real length = square_root(dx * dx + dy * dy);
+
+		if (length > BOT_VEHICLE_DROP_OFF_BACK)
+		{
+			desired.x += dx / length * BOT_VEHICLE_DROP_OFF_BACK;
+			desired.y += dy / length * BOT_VEHICLE_DROP_OFF_BACK;
+		}
+		if (bot->vehicle_drop_off_failures >= BOT_VEHICLE_DROP_OFF_TRIES ||
+			!bot_vehicle_place(vehicle, &desired, objective, bot->vehicle_drop_off_failed,
+				bot->vehicle_drop_off_failures, &bot->vehicle_drop_off, &bot->vehicle_drop_off_polygon))
+			return FALSE;
+	}
+	bot->vehicle_drop_off_valid = TRUE;
+	platform_log("bots: bot %d drives to (%.1f %.1f %.1f), %.1f from its objective", bot->slot + 1,
+		bot->vehicle_drop_off.x, bot->vehicle_drop_off.y, bot->vehicle_drop_off.z,
+		bot_horizontal_distance(&bot->vehicle_drop_off, objective));
+	*goal = bot->vehicle_drop_off;
+	return TRUE;
+}
+
+/* a drop-off no route was found to */
+static void bot_vehicle_drop_off_failed(struct bot *bot)
+{
+	if (bot->vehicle_drop_off_valid && bot->vehicle_drop_off_failures < BOT_VEHICLE_DROP_OFF_TRIES)
+		bot->vehicle_drop_off_failed[bot->vehicle_drop_off_failures++] = bot->vehicle_drop_off_polygon;
+	bot->vehicle_drop_off_valid = FALSE;
 }
 
 /* port: every end of an item pursuit is logged with its claim's release, so a
@@ -1678,8 +2286,12 @@ static void bot_drop_opportunity(struct bot *bot, char const *reason)
 		bot->opportunity_team_index,
 		bot->opportunity_vehicle ? "vehicle" : (bot->opportunity_powerup ? "powerup" : "weapon"),
 		bot->opportunity_index, reason);
-	bot_manager_release_item(bot->opportunity_team_index, bot->opportunity_index,
-		(short)(bot->slot + 1));
+	if (bot->opportunity_vehicle)
+		bot_manager_release_seat(bot->opportunity_team_index, bot->opportunity_index,
+			bot->opportunity_seat, (short)(bot->slot + 1));
+	else
+		bot_manager_release_item(bot->opportunity_team_index, bot->opportunity_index,
+			(short)(bot->slot + 1));
 	bot->opportunity_index = NONE;
 	bot->opportunity_team_index = NONE;
 }
@@ -1693,8 +2305,41 @@ static void bot_maintain_opportunity(struct bot *bot)
 
 	struct object_datum *object;
 
-	if (bot->opportunity_index == NONE || bot->opportunity_vehicle)
+	if (bot->opportunity_index == NONE)
 		return;
+	/* port: a vehicle's seat is checked and claimed again each tick: taken
+	by someone, or by a teammate's claim, the bot takes another seat or gives
+	up the vehicle (before, every bot kept running for the driver's seat) */
+	if (bot->opportunity_vehicle)
+	{
+		short seat;
+
+		object = object_try_and_get(bot->opportunity_index);
+		seat = object ? bot_vehicle_seat(bot, bot->opportunity_index) : NONE;
+		if (!object)
+			bot_drop_opportunity(bot, "taken or gone");
+		else if (now >= bot->opportunity_end_time)
+			bot_drop_opportunity(bot, "timed out");
+		else if (!bot_opportunity_relevant(bot))
+			bot_drop_opportunity(bot, "no longer relevant");
+		else if (seat == NONE)
+			bot_drop_opportunity(bot, "no seat left");
+		else
+		{
+			if (seat != bot->opportunity_seat)
+			{
+				bot_manager_release_seat(bot->opportunity_team_index, bot->opportunity_index,
+					bot->opportunity_seat, (short)(bot->slot + 1));
+				bot->opportunity_seat = seat;
+			}
+			if (bot_manager_claim_seat(bot->opportunity_team_index, bot->opportunity_index, seat,
+				(short)(bot->slot + 1), BOT_SEAT_CLAIM_TICKS))
+				return;
+			bot_drop_opportunity(bot, "seat claimed by another bot");
+		}
+		bot->opportunity_scan_time = now + bot_seconds_to_ticks(3.f);
+		return;
+	}
 	object = object_try_and_get(bot->opportunity_index);
 	if (!object || object->object.parent_object_index != NONE)
 		bot_drop_opportunity(bot, "taken or gone");
@@ -1733,9 +2378,17 @@ static void bot_observe_inventory(struct bot *bot, struct unit_datum const *unit
 			(short)unit->unit.parent_seat_index);
 		bot->observed_vehicle_index = vehicle_index;
 		bot->vehicle_progress_time = NONE;
-		bot->vehicle_callout_time = NONE;
-		bot->vehicle_pickup_scan_time = NONE;
-		bot->vehicle_pickup_player_index = NONE;
+		bot->vehicle_wait_until = NONE;
+		bot->vehicle_wait_logged = FALSE;
+		bot->vehicle_goal_valid = FALSE;
+		/* (a ride taken, or a vehicle left: offers and pickups end) */
+		bot->ride_vehicle_index = NONE;
+		bot->pickup_player_index = NONE;
+		bot->vehicle_drop_off_valid = FALSE;
+		bot->vehicle_drop_off_failures = 0;
+		vehicle_navigation_release((short)(bot->slot + 1));
+		/* (a pickup's time on foot starts again after a ride) */
+		bot->objective_deadline = game_time_get() + 60 * TICKS_PER_SECOND;
 		bot->goal_node = ENGINE_AI_NAV_NODES_MAX;
 		bot_drop_opportunity(bot, vehicle_index == NONE ? "left a vehicle" : "entered a vehicle");
 	}
@@ -1854,7 +2507,7 @@ static boolean bot_item_known(
    BSP routes decide if a wall or other obstacle makes them unreachable. Only
    one bot per team goes for an item (bot_manager_claim_item); enemy-team bots
    have independent claims and a human can still race either bot there. */
-static void bot_find_opportunity(struct bot *bot)
+static void bot_find_opportunity(struct bot *bot, boolean vehicles_only)
 {
 	struct player_datum *player = bot_player(bot);
 	struct object_iterator iterator;
@@ -1883,6 +2536,9 @@ static void bot_find_opportunity(struct bot *bot)
 		boolean is_vehicle = object->object.type == _object_type_vehicle;
 		boolean is_powerup = object->object.type == _object_type_equipment;
 
+		if (vehicles_only && !is_vehicle)
+			continue;
+
 		object_get_origin(iterator.index, &point);
 		distance = distance3d(&origin, &point);
 		if (distance > (is_vehicle ? (real)BOT_VEHICLE_SEEK_RANGE : (real)BOT_WEAPON_SEEK_RANGE) ||
@@ -1899,6 +2555,9 @@ static void bot_find_opportunity(struct bot *bot)
 		}
 		if (is_vehicle)
 		{
+			if (iterator.index == bot->unreachable_item_index &&
+				game_time_get() < bot->unreachable_item_until)
+				continue;
 			seat = bot_vehicle_seat(bot, iterator.index);
 			if (seat == NONE || !unit_get_seat_entrance_point(bot->unit_index,
 				iterator.index, seat, &point, NULL, NULL))
@@ -1932,9 +2591,11 @@ static void bot_find_opportunity(struct bot *bot)
 		bot->opportunity_seat = seat;
 		bot->opportunity_end_time = game_time_get() + bot_seconds_to_ticks(is_vehicle ? 35.f : 12.f);
 	}
-	if (bot->opportunity_index != NONE && !bot->opportunity_vehicle &&
+	if (bot->opportunity_index != NONE && (bot->opportunity_vehicle ?
+		!bot_manager_claim_seat(bot->opportunity_team_index, bot->opportunity_index,
+			bot->opportunity_seat, bot_number, BOT_SEAT_CLAIM_TICKS) :
 		!bot_manager_claim_item(bot->opportunity_team_index, bot->opportunity_index,
-			bot_number, BOT_ITEM_CLAIM_TICKS))
+			bot_number, BOT_ITEM_CLAIM_TICKS)))
 	{
 		bot->opportunity_index = NONE;
 		bot->opportunity_team_index = NONE;
@@ -2183,15 +2844,84 @@ static engine_ai_behavior_result bot_leaf_vehicle(struct bot *bot,
 	if (TEST_FLAG(seat->flags, _unit_seat_driver_bit))
 	{
 		real_point3d goal;
+		real_point3d destination;
 		real_euler_angles2d look;
-		long teammate_player_index = NONE;
-		boolean pickup_teammate = FALSE;
+		struct vehicle_navigation_command drive;
+		struct unit_datum *pickup;
+		enum bot_navigation_result result;
+		real arrival = 4.f;
+		boolean has_destination;
+		boolean unit_goal = FALSE;
+		boolean objective_goal = FALSE;
+		boolean chase_goal = FALSE;
+		long vehicle_index = unit->object.parent_object_index;
 
-		if (bot->target_player_index != NONE)
-			goal = bot->target_last_position;
-		else if (bot_vehicle_pickup_teammate(bot, unit->object.parent_object_index,
-			&goal, &teammate_player_index))
-			pickup_teammate = TRUE;
+		if (bot->vehicle_wait_until == NONE)
+			bot->vehicle_wait_until = now + BOT_VEHICLE_BOARD_WAIT_TICKS;
+		/* port: where the driver is going: its objective (CTF), else the field */
+		objective_goal = bot_destination(bot, &destination);
+		has_destination = objective_goal || bot_vehicle_field_goal(bot, vehicle, &destination);
+		if (has_destination && bot->target_player_index == NONE)
+			bot_choose_pickup(bot, vehicle_index, &destination);
+		pickup = bot_pickup_unit(bot);
+		if (bot->target_player_index != NONE && now >= bot->vehicle_chase_blocked_until)
+		{
+			/* (a target in a building: drive to the nearest open-sky place) */
+			if (!bot->vehicle_chase_valid ||
+				bot_horizontal_distance(&bot->vehicle_chase_target, &bot->target_last_position) > 4.f)
+			{
+				uint32_t polygon;
+
+				bot->vehicle_chase_target = bot->target_last_position;
+				bot->vehicle_chase_valid = bot_vehicle_place(vehicle, &bot->target_last_position,
+					NULL, NULL, 0, &bot->vehicle_chase, &polygon);
+			}
+			goal = bot->vehicle_chase_valid ? bot->vehicle_chase : bot->target_last_position;
+			unit_goal = !bot->vehicle_chase_valid;
+			chase_goal = TRUE;
+		}
+		else if (bot_vehicle_should_wait(bot, vehicle_index))
+		{
+			/* (parked for boarding teammates: not a lack of progress) */
+			if (!bot->vehicle_wait_logged)
+				platform_log("bots: bot %d waits for teammates to board", bot->slot + 1);
+			bot->vehicle_wait_logged = TRUE;
+			bot->vehicle_progress_time = NONE;
+			return ENGINE_AI_BEHAVIOR_RUNNING;
+		}
+		else if (pickup)
+		{
+			/* (to the teammate; beside them, or where they must walk to it,
+			it waits for them to get in) */
+			goal = pickup->object.position;
+			arrival = BOT_RIDE_STOP_DISTANCE;
+			unit_goal = TRUE;
+			if (bot->pickup_meet ||
+				bot_horizontal_distance(&vehicle->object.position, &goal) <= BOT_RIDE_STOP_DISTANCE + 1.f)
+			{
+				bot->vehicle_wait_until = now + BOT_RIDE_BOARD_WAIT_TICKS;
+				bot->vehicle_progress_time = NONE;
+				return ENGINE_AI_BEHAVIOR_RUNNING;
+			}
+		}
+		else if (objective_goal)
+		{
+			/* (to the drivable place nearest it; none left to try: on foot) */
+			if (!bot_vehicle_drop_off(bot, vehicle, &destination, &goal))
+			{
+				if (!bot->vehicle_wait_logged)
+					platform_log("bots: bot %d cannot drive to its objective; getting out", bot->slot + 1);
+				bot->vehicle_wait_logged = TRUE;
+				engine_ai_behavior_intent_emit(emitter, _bot_intent_exit_vehicle, BOT_INTENT_SCHEMA, NULL, 0);
+				return ENGINE_AI_BEHAVIOR_RUNNING;
+			}
+			arrival = 3.f;
+		}
+		else if (has_destination)
+		{
+			goal = destination;
+			arrival = 8.f;
+		}
 		else
 		{
 			struct engine_ai_nav_graph const *graph = bot_navigation_graph();
@@ -2202,21 +2932,109 @@ static engine_ai_behavior_result bot_leaf_vehicle(struct bot *bot,
 				engine_ai_rng32_bounded(&bot->rng, graph->node_count, &bot->goal_node);
 			goal = bots_globals.navigation.nodes[bot->goal_node];
 		}
-		look = bot_angles_to(&vehicle->object.position, &goal);
-		look.pitch = 0.f;
-		if (!bot->target_visible || vehicle->unit.weapon_object_indices[0] == NONE)
-			bot_emit_look(emitter, &look);
-		/* No on-foot strafing/jumping; steer toward the goal at half throttle. */
-		drive_wanted = bot_horizontal_distance(&vehicle->object.position, &goal) > 8.f;
-		if (drive_wanted)
-			bot_emit_move(emitter, look.yaw, 0.5f);
-		else if (pickup_teammate && (bot->vehicle_callout_time == NONE ||
-			now - bot->vehicle_callout_time >= bot_seconds_to_ticks(20.f)))
 		{
-			platform_log("bots: bot %d stopped for teammate %ld; vehicle seat open",
-				bot->slot + 1, (long)DATUM_INDEX_TO_ABSOLUTE_INDEX(teammate_player_index));
-			bot->vehicle_callout_time = now;
+			struct sn_point nav_goal;
+
+			nav_goal.x = goal.x;
+			nav_goal.y = goal.y;
+			nav_goal.z = goal.z;
+			result = vehicle_navigation_drive((short)(bot->slot + 1), vehicle_index, nav_goal, arrival,
+				!unit_goal, &drive);
 		}
+		if (result == BOT_NAVIGATION_ARRIVED)
+		{
+			/* (at its objective: out, and on foot from here; at a place in
+			the field: another, next tick) */
+			if (objective_goal && !unit_goal && !pickup)
+			{
+				if (!bot->vehicle_wait_logged)
+					platform_log("bots: bot %d drove to its objective; getting out", bot->slot + 1);
+				bot->vehicle_wait_logged = TRUE;
+				engine_ai_behavior_intent_emit(emitter, _bot_intent_exit_vehicle, BOT_INTENT_SCHEMA, NULL, 0);
+			}
+			else if (!unit_goal)
+				bot->vehicle_goal_valid = FALSE;
+			bot->vehicle_progress_time = NONE;
+			return ENGINE_AI_BEHAVIOR_RUNNING;
+		}
+		if (result == BOT_NAVIGATION_FAILED && chase_goal)
+		{
+			/* (no way to the target by vehicle: stop retrying, and resume
+			ordinary driving while the gunner can still engage) */
+			bot->vehicle_chase_valid = FALSE;
+			bot->vehicle_chase_blocked_until = now + BOT_VEHICLE_CHASE_BACKOFF_TICKS;
+			bot->vehicle_progress_time = NONE;
+			return ENGINE_AI_BEHAVIOR_RUNNING;
+		}
+		if (result == BOT_NAVIGATION_FAILED)
+		{
+			/* (no way there by vehicle: another place in the field; a pickup
+			or objective it cannot drive to is left to them on foot) */
+			bot->vehicle_goal_valid = FALSE;
+			if (pickup)
+			{
+				/* (they walk to it instead, for as long as that takes them,
+				within the offer) */
+				long walk = bot_seconds_to_ticks(bot_horizontal_distance(&vehicle->object.position,
+					&pickup->object.position) / BOT_RIDE_WALK_SPEED + BOT_RIDE_BOARD_SECONDS);
+
+				bot->pickup_meet = TRUE;
+				bot->pickup_until = MIN(bot->pickup_until, now + walk);
+				platform_log("bots: bot %d cannot drive to teammate %ld; waits for them",
+					bot->slot + 1, (long)DATUM_INDEX_TO_ABSOLUTE_INDEX(bot->pickup_player_index));
+			}
+			else if (objective_goal && !unit_goal)
+				bot_vehicle_drop_off_failed(bot);
+			bot->vehicle_progress_time = NONE;
+			return ENGINE_AI_BEHAVIOR_RUNNING;
+		}
+		if (result == BOT_NAVIGATION_UNAVAILABLE)
+		{
+			/* (no vehicle layer: straight at the goal, at half throttle, as before) */
+			look = bot_angles_to(&vehicle->object.position, &goal);
+			look.pitch = 0.f;
+			if (!bot->target_visible || vehicle->unit.weapon_object_indices[0] == NONE)
+				bot_emit_look(emitter, &look);
+			drive_wanted = bot_horizontal_distance(&vehicle->object.position, &goal) > 8.f &&
+				!bot_vehicle_teammate_ahead(bot, vehicle, FALSE);
+			if (drive_wanted)
+				bot_emit_move(emitter, look.yaw, 0.5f);
+		}
+		else if (drive.has_drive)
+		{
+			/* (the vehicle steers toward where its driver looks; a gun on the
+			driver's seat looks at a seen target instead, and the throttle is
+			taken against that) */
+			look.yaw = drive.yaw;
+			look.pitch = 0.f;
+			if (!bot->target_visible || vehicle->unit.weapon_object_indices[0] == NONE)
+				bot_emit_look(emitter, &look);
+			/* (a teammate in the way: brake, holding the wheel) */
+			if (drive.throttle != 0.f && bot_vehicle_teammate_ahead(bot, vehicle, drive.throttle < 0.f))
+				drive.throttle = drive.throttle > 0.f ? -0.5f : 0.5f;
+			drive_wanted = drive.throttle != 0.f;
+			if (drive.throttle > 0.f)
+				bot_emit_move(emitter, drive.yaw, drive.throttle);
+			else if (drive.throttle < 0.f)
+				bot_emit_move(emitter, bot_angle_normalize(drive.yaw + _pi), -drive.throttle);
+		}
+		/* (a route under way or waiting has its own stall and deadline checks) */
+		if (result != BOT_NAVIGATION_UNAVAILABLE)
+			bot->vehicle_progress_time = NONE;
+	}
+	else if (bot->objective_valid && bot->objective.kind != _bot_ambition_guard &&
+		bot_horizontal_distance(&vehicle->object.position, &bot->objective.position) <=
+			BOT_VEHICLE_DISMOUNT_DISTANCE)
+	{
+		/* port: a rider gets out at its objective */
+		engine_ai_behavior_intent_emit(emitter, _bot_intent_exit_vehicle, BOT_INTENT_SCHEMA, NULL, 0);
+	}
+	else if (vehicle_supports_bot_driver(unit->object.parent_object_index) &&
+		vehicle->unit.driver_object_index == NONE &&
+		magnitude_squared3d(&vehicle->object.translational_velocity) <= BOT_VEHICLE_SEAT_MAXIMUM_SPEED_SQUARED)
+	{
+		/* port: the driver got out (at its objective): so do its riders */
+		engine_ai_behavior_intent_emit(emitter, _bot_intent_exit_vehicle, BOT_INTENT_SCHEMA, NULL, 0);
 	}
 	if (bot->vehicle_progress_time == NONE)
 	{
@@ -2641,6 +3459,23 @@ static void bot_score_behaviors(
 	}
 
 	bot->scores[_bot_leaf_roam - 1] = tuning->roam;
+	/* port: an offered ride, the vehicle stopped for it, is taken: the
+	driver offered it only when it saves the rider time (bot_choose_pickup) */
+	if (bot->ride_vehicle_index != NONE && bot->opportunity_index == bot->ride_vehicle_index &&
+		bot->opportunity_vehicle && !bot->target_visible && bot_opportunity_relevant(bot))
+	{
+		bot->scores[_bot_leaf_scavenge - 1] = 1.f;
+		return;
+	}
+	/* port: a vehicle (or an offered ride) that takes the bot to its
+	objective sooner is the duty's way there: getting in is scored as the
+	objective is, and walking to the objective is not scored meanwhile */
+	if (bot->objective_valid && bot->objective.kind != _bot_ambition_guard &&
+		bot->opportunity_index != NONE && bot->opportunity_vehicle && bot_opportunity_relevant(bot))
+	{
+		bot->scores[_bot_leaf_scavenge - 1] = bot->objective.value;
+		return;
+	}
 	/* port: flag duties beat distractions. Guards can still fight and seek
 	   supplies, but carriers/returners/attackers keep their objective route. */
 	if (bot->objective_valid)
@@ -3611,12 +4446,28 @@ static void bot_reset_life(
 	bot->observed_vehicle_index = NONE;
 	bot->observed_weapons[0] = bot->observed_weapons[1] = NONE;
 	bot->vehicle_progress_time = NONE;
-	bot->vehicle_callout_time = NONE;
-	bot->vehicle_pickup_scan_time = NONE;
-	bot->vehicle_pickup_player_index = NONE;
+	bot->vehicle_wait_until = NONE;
+	bot->vehicle_wait_logged = FALSE;
+	bot->vehicle_goal_valid = FALSE;
+	bot->pickup_player_index = NONE;
+	bot->pickup_until = 0;
+	bot->pickup_meet = FALSE;
+	bot->pickup_scan_time = 0;
+	bot->vehicle_drop_off_valid = FALSE;
+	bot->vehicle_drop_off_failures = 0;
+	bot->pickup_declined_player_index = NONE;
+	bot->pickup_declined_until = 0;
+	bot->ride_vehicle_index = NONE;
+	bot->ride_until = 0;
 	bot_navigation_reset(bot);
 	if (unit)
 		euler_angles2d_from_vector3d(&bot->facing, &unit->unit.desired_aiming_vector);
+	/* port: a moment to get its bearings, looking about from where it faces */
+	bot->orient_start_time = game_time_get();
+	bot->aware_time = bot->orient_start_time + (unit ? bot_seconds_to_ticks(
+		bots_globals.skill->orient_seconds * bot_random_range(bot, 1.f, 1.6f)) : 0);
+	bot->orient_yaw = bot->facing.yaw;
+	bot->orient_direction = bot_random_range(bot, 0.f, 1.f) < 0.5f ? -1.f : 1.f;
 	bot->movement_check_time = NONE;
 	bot->movement_escape_until = 0;
 	bot->movement_escape_yaw = bot->facing.yaw;
@@ -3806,6 +4657,46 @@ static void bot_decide(
 	bot->chosen_leaf = leaf;
 }
 
+/* port: in CTF, a vehicle is worth taking to an objective this far away to
+take or return a flag, or to hunt a carrier; never for a guard or a carrier */
+static boolean bot_ctf_vehicle_wanted(struct bot *bot)
+{
+	struct unit_datum const *unit = bot_living_unit(bot->unit_index);
+
+	if (!unit || !bot->objective_valid || bot_carries_flag(unit) ||
+		(bot->objective.kind != _bot_ambition_take && bot->objective.kind != _bot_ambition_return &&
+		bot->objective.kind != _bot_ambition_hunt))
+		return FALSE;
+	return bot_horizontal_distance(&unit->object.position, &bot->objective.position) > BOT_CTF_DRIVE_DISTANCE;
+}
+
+/* port: a bot that has just spawned gets its bearings before it acts, as a
+player does: it stands and looks about, either side of where it faces, until
+aware_time (its skill's orient_seconds, randomly up to 1.6 times), rather
+than firing at the first enemy in its first second. It notices no enemy
+meanwhile (bot_perceive); being hurt ends it at once. */
+static boolean bot_orient(
+	struct bot *bot)
+{
+	long now = game_time_get();
+	real seconds;
+
+	if (now >= bot->aware_time)
+		return FALSE;
+	seconds = (real)(now - bot->orient_start_time) / (real)TICKS_PER_SECOND;
+	csmemset(&bot->pending, 0, sizeof(bot->pending));
+	bot->pending.has_look = TRUE;
+	/* (a look to one side and back across to the other every two seconds;
+	the skill's turn speed limits it) */
+	bot->pending.look.yaw = bot_angle_normalize(bot->orient_yaw + bot->orient_direction *
+		DEGREES_TO_RADIANS(BOT_ORIENT_SWEEP_DEGREES) * sine(seconds * (real)M_PI));
+	bot->pending.look.pitch = 0.f;
+	/* (standing on purpose: not a stall for bot_keep_moving to escape) */
+	bot->objective_waiting = TRUE;
+	bot_submit_action(bot);
+	return TRUE;
+}
+
 static void bot_think(
 	struct bot *bot)
 {
@@ -3854,14 +4745,32 @@ static void bot_think(
 	bot_debug_sandbox(bot);
 	bot_perceive(bot, player, unit);
 	bot_observe_inventory(bot, unit);
+	if (bot_orient(bot))
+		return;
 	bot_update_objective(bot, player);
-	/* port: the first CTF policy is on foot. Do not let a vehicle opportunity
-	   move a defender into the Slayer driving policy with a flag duty held. */
+	if (bot_await_ride(bot, unit))
+		return;
+	/* port: CTF bots go on foot, except that an attacker or returner whose
+	   objective is far takes a vehicle (and drives teammates there: the
+	   chauffeur), and a bot offered a ride takes it. Defenders and carriers
+	   keep to their duty on foot. */
 	if (game_engine_ctf_bot_variant_supported(game_engine_get_variant()))
-		bot_drop_opportunity(bot, "CTF on-foot objective policy");
+	{
+		boolean riding = bot->ride_vehicle_index != NONE && bot->opportunity_index == bot->ride_vehicle_index;
+
+		if (bot_ctf_vehicle_wanted(bot) || riding)
+		{
+			if (bot->opportunity_index != NONE && !bot->opportunity_vehicle)
+				bot_drop_opportunity(bot, "CTF on-foot objective policy");
+			bot_find_opportunity(bot, TRUE);
+			bot_maintain_opportunity(bot);
+		}
+		else
+			bot_drop_opportunity(bot, "CTF on-foot objective policy");
+	}
 	else
 	{
-		bot_find_opportunity(bot);
+		bot_find_opportunity(bot, FALSE);
 		bot_maintain_opportunity(bot);
 	}
 	bot_decide(bot, player, unit);
@@ -4223,14 +5132,48 @@ static void bots_navigation_reset(
 	void)
 {
 	bot_navigation_reset_all();
+	vehicle_navigation_reset_all();
 	navigation_world_reset();
 	map_anchors_reset();
+}
+
+/* port: bots.team_spawns. In a team game with bots, each player spawns in
+the half of the map nearer its own base (bot_navigation_team_bases: the CTF
+flags, which every map places in its bases), as a team plays from its side
+of the field. Halo's own Team Slayer spawns anywhere a team's starting
+locations allow, which on most maps puts both teams in both bases. Only
+this host's game is changed: bots never play with other machines. */
+static real bots_starting_location_rating(
+	long player_index,
+	union real_point3d const *position)
+{
+	struct player_datum *player;
+	real_point3d home;
+	real_point3d enemy;
+	real home_x;
+	real home_y;
+	real enemy_x;
+	real enemy_y;
+
+	if (!bots_globals.team_spawns || (bots_globals.desired_count == 0 && !bots_globals.had_bots) ||
+		!game_engine_has_teams() || !position || !valid_real_point3d(position))
+		return 1.f;
+	player = player_try_and_get(player_index);
+	if (!player || !bot_navigation_team_bases(player->team_index, &home, &enemy))
+		return 1.f;
+	home_x = position->x - home.x;
+	home_y = position->y - home.y;
+	enemy_x = position->x - enemy.x;
+	enemy_y = position->y - enemy.y;
+	return home_x * home_x + home_y * home_y <= enemy_x * enemy_x + enemy_y * enemy_y ?
+		1.f : BOT_ENEMY_HALF_SPAWN_RATING;
 }
 
 static struct halo_player_controller const bots_controller =
 {
 	.update = bots_controller_update,
 	.controls_player = bots_player_is_bot,
+	.starting_location_rating = bots_starting_location_rating,
 };
 
 struct halo_extension const bots_extension =

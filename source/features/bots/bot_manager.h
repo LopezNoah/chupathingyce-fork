@@ -22,6 +22,8 @@ enum
 	BOT_AMBITIONS_MAXIMUM = 16,
 	/* team games have two teams; free for all shares nothing */
 	BOT_MANAGER_TEAMS = 2,
+	/* seats a vehicle's claims cover (bots.c considers no more) */
+	BOT_MANAGER_SEATS = 16,
 };
 
 /* what a bot may do with an ambition */
@@ -120,6 +122,35 @@ void bot_manager_release_item(
 	long object_index,
 	short bot_number);
 
+/* Vehicle seat claims: one bot per team heads for each seat (below
+BOT_MANAGER_SEATS), so a team's bots do not all run for one driver's seat.
+As with items, a claim never stops a human taking the seat. */
+boolean bot_manager_claim_seat(
+	long team_index,
+	long vehicle_index,
+	short seat_index,
+	short bot_number,
+	long duration_ticks);
+
+boolean bot_manager_seat_claimed_by_other(
+	long team_index,
+	long vehicle_index,
+	short seat_index,
+	short bot_number);
+
+/* whether a teammate bot is on its way to any of the vehicle's seats */
+boolean bot_manager_vehicle_claimed_by_other(
+	long team_index,
+	long vehicle_index,
+	short bot_number);
+
+void bot_manager_release_seat(
+	long team_index,
+	long vehicle_index,
+	short seat_index,
+	short bot_number);
+
+/* every item and seat claim the bot holds */
 void bot_manager_release_bot(
 	long team_index,
 	short bot_number);

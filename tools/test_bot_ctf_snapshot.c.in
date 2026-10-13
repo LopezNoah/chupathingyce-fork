@@ -45,7 +45,7 @@ static struct game_variant variant;
 static long now;
 static int client, scoring=1, weapon_missing[2];
 static struct { short ambition_count; struct bot_ambition ambitions[BOT_AMBITIONS_MAXIMUM];
-    struct engine_ai_claims item_claims; boolean ctf_observed; struct halo_bot_ctf_snapshot ctf_previous; } bot_manager_globals;
+    struct engine_ai_claims item_claims; struct engine_ai_claims seat_claims; boolean ctf_observed; struct halo_bot_ctf_snapshot ctf_previous; } bot_manager_globals;
 static int logged_captures,logged_returns;
 static void platform_log(char const *format, ...) {
     if(strstr(format,"captures")) logged_captures++;
@@ -100,6 +100,7 @@ static void reset(void) {
     variant.universal_variant.teams=1; variant.game_engine_variant.ctf.flag_at_home_to_score=1;
     memset(&bot_manager_globals,0,sizeof(bot_manager_globals));
     engine_ai_claims_reset(&bot_manager_globals.item_claims);
+    engine_ai_claims_reset(&bot_manager_globals.seat_claims);
     now=0; client=0; scoring=1; logged_captures=logged_returns=0; ctf_enabled=1; failures=depowered=0;
     memset(&ctf_events,0,sizeof(ctf_events)); memset(&ctf_globals,0,sizeof(ctf_globals));
     ctf_globals.scores[0]=ctf_globals.scores[1]=0;
@@ -113,10 +114,48 @@ static void reset(void) {
         ctf_globals.flags[i]=&stands[i]; ctf_globals.weapon_indices[i]=10+i;
     }
 }
+/* Vehicle seat claims: one bot per team and seat, no invalid key, released
+   with the bot, expiring when not renewed. */
+static void seat_claim_tests(void) {
+    long vehicle=0x12340005L, other=0x56780005L;
+    short seat;
+    reset();
+    assert(bot_manager_claim_seat(0,vehicle,0,1,60));
+    assert(bot_manager_claim_seat(0,vehicle,0,1,60)); /* renewed by its owner */
+    assert(!bot_manager_claim_seat(0,vehicle,0,2,60)); /* the driver's seat is taken */
+    assert(bot_manager_seat_claimed_by_other(0,vehicle,0,2) && !bot_manager_seat_claimed_by_other(0,vehicle,0,1));
+    assert(bot_manager_claim_seat(0,vehicle,1,2,60) && bot_manager_claim_seat(0,vehicle,2,3,60));
+    assert(bot_manager_vehicle_claimed_by_other(0,vehicle,1) && !bot_manager_vehicle_claimed_by_other(0,vehicle+1,1));
+    /* the other team's scope is independent; the salt is not part of the key */
+    assert(bot_manager_claim_seat(1,vehicle,0,4,60) && bot_manager_seat_claimed_by_other(0,other,0,2));
+    /* invalid seats, vehicles, bots, durations and teams claim nothing */
+    assert(!bot_manager_claim_seat(0,vehicle,-1,1,60) && !bot_manager_claim_seat(0,vehicle,BOT_MANAGER_SEATS,1,60));
+    assert(!bot_manager_claim_seat(0,NONE,0,1,60) && !bot_manager_claim_seat(0,vehicle,3,0,60));
+    assert(!bot_manager_claim_seat(0,vehicle,3,1,0) && !bot_manager_claim_seat(2,vehicle,3,1,60));
+    assert(!bot_manager_seat_claimed_by_other(0,vehicle,BOT_MANAGER_SEATS,2) && !bot_manager_seat_claimed_by_other(-1,vehicle,0,2));
+    bot_manager_release_seat(0,vehicle,BOT_MANAGER_SEATS,1); bot_manager_release_seat(0,NONE,0,1);
+    /* releasing one seat frees it for a teammate */
+    bot_manager_release_seat(0,vehicle,1,2); assert(bot_manager_claim_seat(0,vehicle,1,5,60));
+    /* a bot's departure releases its seats and items together */
+    assert(bot_manager_claim_item(0,10,1,60));
+    bot_manager_release_bot(0,1);
+    assert(!bot_manager_seat_claimed_by_other(0,vehicle,0,2) && !bot_manager_item_claimed_by_other(0,10,2));
+    assert(bot_manager_seat_claimed_by_other(0,vehicle,2,1));
+    /* an unrenewed claim expires */
+    now=61; assert(!bot_manager_seat_claimed_by_other(0,vehicle,2,1) && bot_manager_claim_seat(0,vehicle,2,1,60));
+    /* every seat of a vehicle can be claimed, by different bots */
+    reset();
+    for (seat=0; seat<BOT_MANAGER_SEATS; seat++) assert(bot_manager_claim_seat(0,vehicle,seat,(short)(seat+1),60));
+    assert(bot_manager_vehicle_claimed_by_other(0,vehicle,BOT_MANAGER_SEATS+1));
+    /* free for all shares one scope */
+    reset(); variant.universal_variant.teams=0;
+    assert(bot_manager_claim_seat(5,vehicle,0,1,60) && bot_manager_seat_claimed_by_other(9,vehicle,0,2));
+}
 int main(void) {
     struct halo_bot_ctf_snapshot state;
     struct bot_ambition goal;
     int i;
+    seat_claim_tests();
     reset(); assert(!game_engine_ctf_bot_variant_supported(NULL));
     assert(game_engine_ctf_bot_variant_supported(&variant));
     variant.game_engine_variant.ctf.assault=1; assert(!game_engine_ctf_bot_variant_supported(&variant));

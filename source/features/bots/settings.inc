@@ -13,6 +13,10 @@ written grouped by section. */
 		"Opt-in experimental standard two-flag CTF objectives and lobby mode.\n"
 		"Pickup, return and scoring checked on Blood Gulch and Battle Creek; off by default.\n"
 		"No Assault, single-flag or manual-reset variants (docs/bot-objective-modes.md)." },
+	{ "bots.team_spawns", _config_boolean, "true", "HALO_BOT_TEAM_SPAWNS", _environment_value, _platform_all,
+		"In a team game with bots, each team spawns in its own half of the map,\n"
+		"nearer its own base. False: Halo's own spawns, where both teams can\n"
+		"start in the same base." },
 	{ "bots.skill", _config_string, "\"marine\"", "HALO_BOT_SKILL", _environment_value, _platform_all,
 		"How well the bots play: \"recruit\", \"marine\", \"odst\" or \"spartan\".\n"
 		"Skill changes their reactions, aim and sight, never their health or damage." },

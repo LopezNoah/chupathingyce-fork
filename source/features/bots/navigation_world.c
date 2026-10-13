@@ -11,6 +11,9 @@
 #include "physics/collisions.h"
 #include "physics/collision_features.h"
 #include "units/units.h"
+#include "units/vehicles.h"
+#include "objects/object_definitions.h"
+#include "physics/physics_definitions.h"
 #include "units/biped_definitions.h"
 #include "units/bipeds.h"
 #include "physics/physics.h"
@@ -35,27 +38,70 @@ boolean network_game_distributed_client(void);
    than retried every two seconds. */
 enum { NAV_BLOCKS = 64, NAV_BLOCK_MEMORY_TICKS = 30*TICKS_PER_SECOND, NAV_BLOCK_STRIKES_MAX = 4 };
 struct nav_block { uint32_t polygon; long until, forget; short strikes; };
-static struct {
-    struct sn_resource resources[2];
+
+/* port: two layers of the same walkable surfaces. Bipeds walk the first, built
+   for the spawned biped's capsule. Bots driving ground vehicles use the second,
+   built once the first is published and only on a map with a vehicle a bot can
+   drive: its slope limit is a vehicle's, and every route segment is swept with
+   a pill as wide and tall as the widest such vehicle's mass points (the spheres
+   Halo's vehicle physics touches the world with), raised over the bumps its
+   wheels ride. The vehicle layer has one buffer, not two: it is unavailable
+   while a new map or BSP builds it again, as the foot layer is not. */
+enum { NAV_LAYER_FOOT, NAV_LAYER_VEHICLE, NAV_LAYERS };
+struct nav_layer {
+    struct sn_resource *resources[2];
     struct sn_build build;
     struct sn_key requested;
     int active, staging;
-    uint64_t revision, obstacles;
     enum sn_status status;
     boolean requested_valid;
-    long last_tick;
-    struct nav_block blocks[NAV_BLOCKS];
-    FILE *dump;
-    uint32_t dump_cursor;
-    char dump_path[512], temporary_path[528];
     clock_t cpu_time;
+    uint64_t obstacles;
+    struct nav_block blocks[NAV_BLOCKS];
     /* Static verdicts of the canonical center->portal (low two bits) and
        portal->center (next two bits) halves of each polygon edge, for the
        active resource: 0 unknown, 1 clear, 2 blocked. */
     uint8_t edge_cache[SN_POLYGONS_MAX][SN_VERTICES_MAX];
     unsigned long sweeps, cache_hits, stats_sweeps, stats_hits;
+    /* the pill routes are checked with: its radius, center-to-center height
+       and how far its lower sphere is raised above the ground */
+    float sweep_radius, sweep_height, sweep_lift;
+};
+static struct sn_resource foot_resources[2], vehicle_resource;
+static struct {
+    struct nav_layer layers[NAV_LAYERS];
+    uint64_t revision;
+    long last_tick;
+    FILE *dump;
+    uint32_t dump_cursor;
+    char dump_path[512], temporary_path[528];
     long stats_tick;
+    /* the vehicle layer's body, from the map's drivable vehicles */
+    boolean vehicle_body_valid;
+    float vehicle_half_width, vehicle_half_length, vehicle_height;
+    /* port: whether each vehicle-layer polygon's center has open sky above
+       (0 not yet known, 1 open, 2 roofed), found NAV_OPEN_SKY_RAYS_PER_TICK
+       polygons a tick after the layer is published; open_sky_cursor polygons
+       done */
+    uint8_t open_sky[SN_POLYGONS_MAX];
+    uint32_t open_sky_cursor;
+    uint32_t open_sky_roofed;
 } world;
+
+/* port: the vehicle layer's topology. Its polygons are linked as the foot
+   layer's are (a radius this small keeps the terrain's short shared edges
+   joined: a larger one cuts rolling ground into islands); clearance from walls
+   and scenery is the swept pill's, at its full width. */
+#define NAV_VEHICLE_TOPOLOGY_RADIUS 0.25f
+/* steeper than this is not driven (about 41 degrees; bipeds' is their tag's) */
+#define NAV_VEHICLE_MINIMUM_NORMAL_Z 0.75f
+/* the bumps a vehicle's wheels ride over, at most */
+#define NAV_VEHICLE_SWEEP_LIFT_MAXIMUM 0.2f
+/* the vehicles examined for the layer's body, and a body's sane extents */
+enum { NAV_VEHICLES_EXAMINED = 256, NAV_MASS_POINTS_MAXIMUM = 32, NAV_OPEN_SKY_RAYS_PER_TICK = 64 };
+/* how high above a polygon's center a roof is looked for */
+#define NAV_OPEN_SKY_HEIGHT 20.f
+#define NAV_VEHICLE_EXTENT_MAXIMUM 10.f
 
 static struct sn_point nav_point(real_point3d p)
 {
@@ -88,26 +134,66 @@ static uint32_t agent_hash(struct sn_agent agent)
     }
     return hash;
 }
+static struct nav_layer *layer(int index)
+{
+    assert(index>=0 && index<NAV_LAYERS);
+    return &world.layers[index];
+}
+static void layer_reset(struct nav_layer *l)
+{
+    l->active=-1; l->staging=0;
+    l->requested_valid=FALSE; l->status=SN_INVALID;
+    l->obstacles++;
+    csmemset(l->blocks,0,sizeof(l->blocks));
+    csmemset(l->edge_cache,0,sizeof(l->edge_cache));
+}
+/* (each layer's storage: the foot layer's two buffers, the vehicle's one) */
+static void layers_attach(void)
+{
+    world.layers[NAV_LAYER_FOOT].resources[0]=&foot_resources[0];
+    world.layers[NAV_LAYER_FOOT].resources[1]=&foot_resources[1];
+    world.layers[NAV_LAYER_VEHICLE].resources[0]=&vehicle_resource;
+    world.layers[NAV_LAYER_VEHICLE].resources[1]=&vehicle_resource;
+}
 void navigation_world_reset(void)
 {
     if (world.dump) { fclose(world.dump); world.dump=NULL; }
-    world.active=-1; world.staging=0;
-    world.requested_valid=FALSE; world.status=SN_INVALID;
+    layers_attach();
+    layer_reset(layer(NAV_LAYER_FOOT));
+    layer_reset(layer(NAV_LAYER_VEHICLE));
+    world.vehicle_body_valid=FALSE;
+    world.open_sky_cursor=0; world.open_sky_roofed=0;
     world.last_tick=NONE;
-    world.revision++; world.obstacles++;
-    csmemset(world.blocks,0,sizeof(world.blocks));
-    csmemset(world.edge_cache,0,sizeof(world.edge_cache));
+    world.revision++;
     world.stats_tick=NONE;
+}
+static const struct sn_resource *layer_resource(const struct nav_layer *l)
+{
+    const struct sn_resource *r;
+    if (!l->requested_valid || l->active<0 || !l->resources[l->active]) return NULL;
+    r=l->resources[l->active];
+    if (!r->ready || !key_equal(r->key,l->requested)) return NULL;
+    /* an editor (Forge) changed the world since it was built */
+    if (r->key.overlay_revision!=halo_extensions_world_edit_revision()) return NULL;
+    return r;
 }
 const struct sn_resource *navigation_world_resource(void)
 {
-    if (!world.requested_valid || world.active<0 ||
-        !key_equal(world.resources[world.active].key,world.requested)) return NULL;
-    /* an editor (Forge) changed the world since it was built */
-    if (world.resources[world.active].key.overlay_revision!=halo_extensions_world_edit_revision()) return NULL;
-    return &world.resources[world.active];
+    return layer_resource(layer(NAV_LAYER_FOOT));
 }
-uint64_t navigation_world_obstacle_revision(void) { return world.obstacles; }
+const struct sn_resource *navigation_world_vehicle_resource(void)
+{
+    return layer_resource(layer(NAV_LAYER_VEHICLE));
+}
+uint64_t navigation_world_obstacle_revision(void) { return world.layers[NAV_LAYER_FOOT].obstacles; }
+bool navigation_world_vehicle_body(float *half_width, float *half_length, float *height)
+{
+    if (!world.vehicle_body_valid) return false;
+    if (half_width) *half_width=world.vehicle_half_width;
+    if (half_length) *half_length=world.vehicle_half_length;
+    if (height) *height=world.vehicle_height;
+    return true;
+}
 
 /* Decode only walkable, nonbreakable rings. Never invoke legacy NONE reads.
    Every dereference is preceded by count/index checks; loaded tag pointers have
@@ -218,54 +304,184 @@ static void dump_step(const struct sn_resource *r)
         else platform_log("nav: walkable polygon diagnostic dump complete (%u polygons)",r->polygon_count);
     }
 }
-static void update_resource(long unit_index)
+/* Start or continue one layer's build for this agent and key. The vehicle
+   layer's single buffer is unpublished (active -1) while it builds. */
+static void layer_build(struct nav_layer *l, char const *name, struct sn_agent agent)
 {
-    struct unit_datum *unit=unit_get(unit_index);
-    struct biped_definition *definition=biped_definition_get(unit->definition_index);
     struct structure_bsp *structure=global_structure_bsp_get();
-    struct sn_agent agent;
     struct sn_key key;
     clock_t before;
-    agent.radius=definition->biped.collision_radius;
-    agent.height=definition->biped.collision_height_standing;
-    agent.minimum_normal_z=definition->biped.runtime_minimum_normal_k;
-    agent.projection_height=agent.height;
     key.map_identity=name_hash(cache_file_loaded_map_name()); key.checksum=(uint32_t)cache_files_get_checksum();
     key.bsp_index=(uint32_t)global_structure_bsp_index; key.agent_identity=agent_hash(agent);
     key.format_version=SN_FORMAT_VERSION;
     key.overlay_revision=halo_extensions_world_edit_revision();
-    if (!world.requested_valid || !key_equal(key,world.requested)) {
-        world.requested=key; world.requested_valid=TRUE; world.cpu_time=0;
-        if (world.dump) { fclose(world.dump); world.dump=NULL; }
-        world.staging=world.active==0 ? 1 : 0;
-        if (!source_valid(structure)) { world.status=SN_INVALID; platform_log("nav: invalid BSP source blocks"); return; }
-        world.status=sn_build_begin(&world.build,&world.resources[world.staging],
+    if (!l->requested_valid || !key_equal(key,l->requested)) {
+        l->requested=key; l->requested_valid=TRUE; l->cpu_time=0;
+        if (l==layer(NAV_LAYER_FOOT) && world.dump) { fclose(world.dump); world.dump=NULL; }
+        l->staging=l->active==0 ? 1 : 0;
+        if (l->active>=0 && l->resources[l->staging]==l->resources[l->active]) l->active=-1;
+        if (!source_valid(structure)) { l->status=SN_INVALID; platform_log("nav: invalid BSP source blocks"); return; }
+        l->status=sn_build_begin(&l->build,l->resources[l->staging],
             (uint32_t)structure->pathfinding_surfaces.count,key,++world.revision,agent);
-        platform_log("nav: build BSP %d, radius %.3f height %.3f normal-k %.3f, source surfaces %ld",
-            global_structure_bsp_index,agent.radius,agent.height,agent.minimum_normal_z,structure->pathfinding_surfaces.count);
+        platform_log("nav: build %s BSP %d, radius %.3f height %.3f normal-k %.3f, source surfaces %ld",
+            name,global_structure_bsp_index,agent.radius,agent.height,agent.minimum_normal_z,
+            structure->pathfinding_surfaces.count);
     }
-    if (world.status==SN_RUNNING) {
+    if (l->status==SN_RUNNING) {
         before=clock();
-        world.status=sn_build_step(&world.build,&world.resources[world.staging],128,read_surface,NULL);
-        world.cpu_time+=clock()-before;
-        if (world.status==SN_READY) {
-            world.active=world.staging; world.obstacles++;
-            csmemset(world.blocks,0,sizeof(world.blocks));
-            csmemset(world.edge_cache,0,sizeof(world.edge_cache));
-            platform_log("nav: published %u walkable polygons, BSP %d, CPU %.2f ms, resource %lu bytes",
-                world.resources[world.active].polygon_count,global_structure_bsp_index,
-                1000.0*(double)world.cpu_time/CLOCKS_PER_SEC,(unsigned long)sizeof(struct sn_resource));
-            dump_begin(&world.resources[world.active]);
-        } else if (world.status!=SN_RUNNING) platform_log("nav: build failed (%s), no partial publication",sn_status_name(world.status));
+        l->status=sn_build_step(&l->build,l->resources[l->staging],128,read_surface,NULL);
+        l->cpu_time+=clock()-before;
+        if (l->status==SN_READY) {
+            const struct sn_resource *r=l->resources[l->staging];
+            uint32_t i,usable=0,largest=0,count=0;
+            l->active=l->staging; l->obstacles++;
+            csmemset(l->blocks,0,sizeof(l->blocks));
+            csmemset(l->edge_cache,0,sizeof(l->edge_cache));
+            /* (the largest connected set, counted once: polygon_count steps
+            twice, components being their lowest index) */
+            for (i=0;i<r->polygon_count;i++) if (r->components[i]!=SN_NONE) usable++;
+            for (i=0;i<r->polygon_count;i++) if (r->components[i]==i) {
+                uint32_t j,size=0;
+                count++;
+                if (count>64) continue; /* (the largest of the first 64 sets) */
+                for (j=i;j<r->polygon_count;j++) if (r->components[j]==i) size++;
+                if (size>largest) largest=size;
+            }
+            platform_log("nav: published %s %u walkable polygons (%u usable, %u connected sets, largest %u), "
+                "BSP %d, CPU %.2f ms, resource %lu bytes",name,r->polygon_count,usable,count,largest,
+                global_structure_bsp_index,1000.0*(double)l->cpu_time/CLOCKS_PER_SEC,
+                (unsigned long)sizeof(struct sn_resource));
+            if (l==layer(NAV_LAYER_FOOT)) dump_begin(r);
+            else { world.open_sky_cursor=0; world.open_sky_roofed=0; }
+        } else if (l->status!=SN_RUNNING)
+            platform_log("nav: %s build failed (%s), no partial publication",name,sn_status_name(l->status));
     }
+}
+static void update_resource(long unit_index)
+{
+    struct unit_datum *unit=unit_get(unit_index);
+    struct biped_definition *definition=biped_definition_get(unit->definition_index);
+    struct nav_layer *l=layer(NAV_LAYER_FOOT);
+    struct sn_agent agent;
+    agent.radius=definition->biped.collision_radius;
+    agent.height=definition->biped.collision_height_standing;
+    agent.minimum_normal_z=definition->biped.runtime_minimum_normal_k;
+    agent.projection_height=agent.height;
+    l->sweep_radius=agent.radius; l->sweep_height=agent.height-2.f*agent.radius; l->sweep_lift=0.f;
+    layer_build(l,"foot",agent);
     dump_step(navigation_world_resource());
+}
+/* A vehicle's body from its physics mass points, in its own frame (x
+   forward, y left, z up): the widest side, the longer end and the height they
+   span. FALSE for a vehicle without usable physics. Untrusted tag values:
+   counts and extents are checked. */
+static boolean vehicle_body(long vehicle_index, float *half_width, float *half_length, float *height)
+{
+    struct object_datum *object=object_try_and_get(vehicle_index);
+    struct object_definition *definition;
+    struct physics_definition *physics;
+    float width=0.f,length=0.f,low=0.f,high=0.f;
+    long i;
+    if (!object) return FALSE;
+    definition=object_definition_get(object->definition_index);
+    if (definition->object.physics.index==NONE) return FALSE;
+    physics=physics_definition_get(definition->object.physics.index);
+    if (physics->mass_points.count<=0 || physics->mass_points.count>NAV_MASS_POINTS_MAXIMUM) return FALSE;
+    for (i=0;i<physics->mass_points.count;i++) {
+        struct mass_point_definition *point=TAG_BLOCK_GET_ELEMENT(&physics->mass_points,i,struct mass_point_definition);
+        float r=point->radius;
+        if (!valid_real_point3d(&point->position) || !(r>=0.f && r<NAV_VEHICLE_EXTENT_MAXIMUM) ||
+            !(fabsf(point->position.x)<NAV_VEHICLE_EXTENT_MAXIMUM) ||
+            !(fabsf(point->position.y)<NAV_VEHICLE_EXTENT_MAXIMUM) ||
+            !(fabsf(point->position.z)<NAV_VEHICLE_EXTENT_MAXIMUM)) return FALSE;
+        width=MAX(width,fabsf(point->position.y)+r);
+        length=MAX(length,fabsf(point->position.x)+r);
+        if (!i || point->position.z-r<low) low=point->position.z-r;
+        if (!i || point->position.z+r>high) high=point->position.z+r;
+    }
+    if (!(width>0.05f) || !(length>0.05f) || !(high-low>0.05f)) return FALSE;
+    *half_width=width; *half_length=length; *height=high-low;
+    return TRUE;
+}
+/* The widest of the map's ground vehicles a bot can drive (at most
+   NAV_VEHICLES_EXAMINED objects): every one fits where it does. */
+static boolean find_vehicle_body(void)
+{
+    struct object_iterator iterator;
+    short examined=0;
+    boolean found=FALSE;
+    float width=0.f,length=0.f,height=0.f;
+    object_iterator_new(&iterator,_object_mask_vehicle,0);
+    while (examined++<NAV_VEHICLES_EXAMINED && object_iterator_next(&iterator)) {
+        float w,l,h;
+        if (!vehicle_supports_bot_driver(iterator.index) || !vehicle_body(iterator.index,&w,&l,&h)) continue;
+        if (!found || w>width) width=w;
+        if (!found || l>length) length=l;
+        if (!found || h>height) height=h;
+        found=TRUE;
+    }
+    if (!found) return FALSE;
+    world.vehicle_half_width=width; world.vehicle_half_length=length; world.vehicle_height=height;
+    return TRUE;
+}
+/* At most NAV_OPEN_SKY_RAYS_PER_TICK rays straight up from the vehicle
+   layer's polygon centers: a roof (the structure, either face) within
+   NAV_OPEN_SKY_HEIGHT marks a place inside a building, which a driver does
+   not drive to. */
+static void update_open_sky(void)
+{
+    const struct sn_resource *r=navigation_world_vehicle_resource();
+    struct collision_result collision;
+    uint32_t work;
+    if (!r || world.open_sky_cursor>=r->polygon_count) return;
+    for (work=0;work<NAV_OPEN_SKY_RAYS_PER_TICK && world.open_sky_cursor<r->polygon_count;work++) {
+        uint32_t i=world.open_sky_cursor++;
+        real_point3d from;
+        real_vector3d up;
+        from.x=r->polygons[i].center.x; from.y=r->polygons[i].center.y; from.z=r->polygons[i].center.z+0.5f;
+        up.i=0.f; up.j=0.f; up.k=NAV_OPEN_SKY_HEIGHT;
+        world.open_sky[i]=collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit)|
+            FLAG(_collision_test_back_facing_surfaces_bit)|FLAG(_collision_test_structure_bit),
+            &from,&up,NONE,&collision) ? 2 : 1;
+        if (world.open_sky[i]==2) world.open_sky_roofed++;
+    }
+    if (world.open_sky_cursor==r->polygon_count)
+        platform_log("nav: vehicle layer open sky over %u of %u polygons",
+            r->polygon_count-world.open_sky_roofed,r->polygon_count);
+}
+int navigation_world_vehicle_open_sky(uint32_t polygon)
+{
+    const struct sn_resource *r=navigation_world_vehicle_resource();
+    if (!r || polygon>=r->polygon_count || polygon>=world.open_sky_cursor) return -1;
+    return world.open_sky[polygon]==1;
+}
+static void update_vehicle_resource(void)
+{
+    struct nav_layer *l=layer(NAV_LAYER_VEHICLE);
+    struct sn_agent agent;
+    if (!navigation_world_resource()) return;
+    if (!world.vehicle_body_valid) {
+        if (!find_vehicle_body()) return;
+        world.vehicle_body_valid=TRUE;
+        platform_log("nav: vehicle body half-width %.2f half-length %.2f height %.2f",
+            world.vehicle_half_width,world.vehicle_half_length,world.vehicle_height);
+    }
+    agent.radius=NAV_VEHICLE_TOPOLOGY_RADIUS;
+    agent.height=world.vehicle_height;
+    agent.minimum_normal_z=NAV_VEHICLE_MINIMUM_NORMAL_Z;
+    agent.projection_height=MAX(world.vehicle_height,1.f);
+    l->sweep_radius=world.vehicle_half_width;
+    l->sweep_lift=MIN(NAV_VEHICLE_SWEEP_LIFT_MAXIMUM,0.5f*world.vehicle_half_width);
+    l->sweep_height=MAX(0.f,world.vehicle_height-l->sweep_lift-2.f*l->sweep_radius);
+    layer_build(l,"vehicle",agent);
+    update_open_sky();
 }
 void navigation_world_update_for_players(void)
 {
     struct data_iterator iterator;
     struct player_datum *player;
     long now=game_time_get();
-    short i;
+    short i,j;
     char const *dump=config_string("debug.nav_dump");
     /* The ordinary bots now use this BSP resource too. Keep it dormant when
      * bots and diagnostics are all off so the default build does no mesh work. */
@@ -274,36 +490,43 @@ void navigation_world_update_for_players(void)
     if (network_game_distributed_client() || (game_connection()!=_game_connection_local &&
         game_connection()!=_game_connection_network_server)) return;
     if (world.last_tick==now) return;
+    layers_attach();
     if (world.last_tick!=NONE && now<world.last_tick) navigation_world_reset();
     world.last_tick=now;
-    for (i=0;i<NAV_BLOCKS;i++) if (world.blocks[i].until && now>=world.blocks[i].until) {
-        world.blocks[i].until=0; world.obstacles++;
+    for (j=0;j<NAV_LAYERS;j++) for (i=0;i<NAV_BLOCKS;i++) if (world.layers[j].blocks[i].until &&
+        now>=world.layers[j].blocks[i].until) {
+        world.layers[j].blocks[i].until=0; world.layers[j].obstacles++;
     }
     /* one line every ten seconds: the cost of route searches' collision sweeps */
     if (world.stats_tick==NONE) world.stats_tick=now;
     else if (now-world.stats_tick>=10*TICKS_PER_SECOND) {
-        if (world.sweeps!=world.stats_sweeps || world.cache_hits!=world.stats_hits)
-            platform_log("nav: search sweeps %lu, cached edge verdicts %lu (last 10 s)",
-                world.sweeps-world.stats_sweeps,world.cache_hits-world.stats_hits);
-        world.stats_sweeps=world.sweeps; world.stats_hits=world.cache_hits; world.stats_tick=now;
+        for (j=0;j<NAV_LAYERS;j++) {
+            struct nav_layer *l=layer(j);
+            if (l->sweeps!=l->stats_sweeps || l->cache_hits!=l->stats_hits)
+                platform_log("nav: %s search sweeps %lu, cached edge verdicts %lu (last 10 s)",
+                    j==NAV_LAYER_FOOT ? "foot" : "vehicle",l->sweeps-l->stats_sweeps,l->cache_hits-l->stats_hits);
+            l->stats_sweeps=l->sweeps; l->stats_hits=l->cache_hits;
+        }
+        world.stats_tick=now;
     }
     data_iterator_new(&iterator,player_data);
     while ((player=data_iterator_next(&iterator))!=NULL) {
         if (player->unit_index!=NONE && object_get(player->unit_index)->object.type==_object_type_biped) {
             update_resource(player->unit_index);
-            return;
+            break;
         }
     }
+    /* (after the foot layer is published: one build's work per tick) */
+    update_vehicle_resource();
 }
-void navigation_world_block(uint32_t polygon)
+static void layer_block(struct nav_layer *l, const struct sn_resource *r, uint32_t polygon)
 {
     short i,slot=NONE;
     long now=game_time_get();
     struct nav_block *block;
-    const struct sn_resource *r=navigation_world_resource();
     if (!r || polygon>=r->polygon_count) return;
     for (i=0;i<NAV_BLOCKS;i++) {
-        block=&world.blocks[i];
+        block=&l->blocks[i];
         if ((block->until || now<block->forget) && block->polygon==polygon) { slot=i; break; }
         if (slot==NONE && !block->until && now>=block->forget) slot=i;
     }
@@ -311,71 +534,98 @@ void navigation_world_block(uint32_t polygon)
         platform_log("nav: temporary blockage capacity exhausted; wait rather than corrupt topology");
         return;
     }
-    block=&world.blocks[slot];
+    block=&l->blocks[slot];
     if (block->polygon==polygon && (block->until || now<block->forget))
         block->strikes=(short)MIN(block->strikes+1,NAV_BLOCK_STRIKES_MAX);
     else block->strikes=0;
     block->polygon=polygon;
     block->until=now+(2*TICKS_PER_SECOND<<block->strikes);
     block->forget=block->until+NAV_BLOCK_MEMORY_TICKS;
-    world.obstacles++;
+    l->obstacles++;
     if (block->strikes)
         platform_log("nav: polygon %lu blocked again; %ld s",(unsigned long)polygon,2L<<block->strikes);
 }
-bool navigation_world_polygon_blocked(uint32_t polygon)
+void navigation_world_block(uint32_t polygon)
+{
+    layer_block(layer(NAV_LAYER_FOOT),navigation_world_resource(),polygon);
+}
+void navigation_world_vehicle_block(uint32_t polygon)
+{
+    layer_block(layer(NAV_LAYER_VEHICLE),navigation_world_vehicle_resource(),polygon);
+}
+static bool layer_polygon_blocked(const struct nav_layer *l, uint32_t polygon)
 {
     short i;
-    for (i=0;i<NAV_BLOCKS;i++) if (world.blocks[i].until && world.blocks[i].polygon==polygon) return true;
+    for (i=0;i<NAV_BLOCKS;i++) if (l->blocks[i].until && l->blocks[i].polygon==polygon) return true;
     return false;
 }
-static bool sweep_clear(const struct sn_resource *r, long flags, long ignore,
+bool navigation_world_polygon_blocked(uint32_t polygon)
+{
+    return layer_polygon_blocked(layer(NAV_LAYER_FOOT),polygon);
+}
+bool navigation_world_vehicle_polygon_blocked(uint32_t polygon)
+{
+    return layer_polygon_blocked(layer(NAV_LAYER_VEHICLE),polygon);
+}
+/* The layer's pill swept from a to b. CE's pill base is the lower sphere
+   CENTER; its height is the distance between sphere centers, not total
+   standing height (biped_get_physics_pill). Raised by radius/normal-k to stay
+   tangent to sloping ground, and by the layer's lift. */
+static bool sweep_clear(const struct nav_layer *l, const struct sn_resource *r, long flags, long ignore,
     struct sn_point a, uint32_t ap, struct sn_point b, uint32_t bp)
 {
     real_point3d from,clipped;
     real_vector3d delta,clipped_velocity;
     struct collision_plane planes[8];
     float target_z;
-    /* CE's pill base is the lower sphere CENTER; its height is the distance
-       between sphere centers, not total standing height (biped_get_physics_pill).
-       Raise it by radius/normal-k to stay tangent to sloping ground. */
     from.x=a.x; from.y=a.y;
-    from.z=a.z+r->agent.radius/r->polygons[ap].normal.z+0.02f;
-    target_z=b.z+r->agent.radius/r->polygons[bp].normal.z+0.02f;
+    from.z=a.z+l->sweep_radius/r->polygons[ap].normal.z+l->sweep_lift+0.02f;
+    target_z=b.z+l->sweep_radius/r->polygons[bp].normal.z+l->sweep_lift+0.02f;
     delta.i=b.x-a.x; delta.j=b.y-a.y; delta.k=target_z-from.z;
-    collision_move_pill(flags,&from,&delta,
-        r->agent.height-2.f*r->agent.radius,r->agent.radius,ignore,
+    collision_move_pill(flags,&from,&delta,l->sweep_height,l->sweep_radius,ignore,
         &clipped,&clipped_velocity,8,planes);
     return fabsf(clipped.x-b.x)<0.08f && fabsf(clipped.y-b.y)<0.08f &&
         fabsf(clipped.z-target_z)<0.15f;
 }
-static bool blocked_pair(uint32_t ap, uint32_t bp)
+static bool blocked_pair(const struct nav_layer *l, uint32_t ap, uint32_t bp)
 {
     short i;
-    for (i=0;i<NAV_BLOCKS;i++) if (world.blocks[i].until &&
-        (world.blocks[i].polygon==ap || world.blocks[i].polygon==bp)) return true;
+    for (i=0;i<NAV_BLOCKS;i++) if (l->blocks[i].until &&
+        (l->blocks[i].polygon==ap || l->blocks[i].polygon==bp)) return true;
     return false;
 }
 bool navigation_world_segment_clear(void *context, struct sn_point a, uint32_t ap,
     struct sn_point b, uint32_t bp)
 {
+    const struct nav_layer *l=layer(NAV_LAYER_FOOT);
     const struct sn_resource *r=navigation_world_resource();
     if (!context || !r || ap>=r->polygon_count || bp>=r->polygon_count) return false;
-    if (blocked_pair(ap,bp)) return false;
-    return sweep_clear(r,_collision_test_for_bipeds_living_flags,*(long *)context,a,ap,b,bp);
+    if (blocked_pair(l,ap,bp)) return false;
+    return sweep_clear(l,r,_collision_test_for_bipeds_living_flags,*(long *)context,a,ap,b,bp);
 }
 /* Following: vehicles and machines only. The ground was checked by the route
    search, and a straight sweep from the bot to its waypoint across uneven
    terrain reads a hill as an obstacle; other bipeds are avoided by the bot's
    own steering, which probes around them every tick. */
-bool navigation_world_occupant_clear(void *context, struct sn_point a, uint32_t ap,
-    struct sn_point b, uint32_t bp)
+static bool layer_occupant_clear(int index, const struct sn_resource *r, void *context,
+    struct sn_point a, uint32_t ap, struct sn_point b, uint32_t bp)
 {
-    const struct sn_resource *r=navigation_world_resource();
+    const struct nav_layer *l=layer(index);
     long const flags=FLAG(_collision_test_objects_bit)|FLAG(_collision_test_objects_vehicles_bit)|
         FLAG(_collision_test_objects_machines_bit);
     if (!context || !r || ap>=r->polygon_count || bp>=r->polygon_count) return false;
-    if (blocked_pair(ap,bp)) return false;
-    return sweep_clear(r,flags,*(long *)context,a,ap,b,bp);
+    if (blocked_pair(l,ap,bp)) return false;
+    return sweep_clear(l,r,flags,*(long *)context,a,ap,b,bp);
+}
+bool navigation_world_occupant_clear(void *context, struct sn_point a, uint32_t ap,
+    struct sn_point b, uint32_t bp)
+{
+    return layer_occupant_clear(NAV_LAYER_FOOT,navigation_world_resource(),context,a,ap,b,bp);
+}
+bool navigation_world_vehicle_occupant_clear(void *context, struct sn_point a, uint32_t ap,
+    struct sn_point b, uint32_t bp)
+{
+    return layer_occupant_clear(NAV_LAYER_VEHICLE,navigation_world_vehicle_resource(),context,a,ap,b,bp);
 }
 /* A short ascent on an existing corridor, never an inferred island link.
    Use the body's current momentum rather than assuming immediate run speed. */
@@ -432,10 +682,10 @@ static uint32_t portal_edge(const struct sn_polygon *p, struct sn_point portal)
    if a bot stays stuck, blocks a polygon here. The canonical halves of an
    edge (center->portal, portal->center) are swept once per resource and the
    verdict cached; segments to or from a start or goal point are swept each time. */
-bool navigation_world_search_clear(void *context, struct sn_point a, uint32_t ap,
-    struct sn_point b, uint32_t bp)
+static bool layer_search_clear(int index, const struct sn_resource *r, void *context,
+    struct sn_point a, uint32_t ap, struct sn_point b, uint32_t bp)
 {
-    const struct sn_resource *r=navigation_world_resource();
+    struct nav_layer *l=layer(index);
     long const flags=_collision_test_for_bipeds_living_flags &
         ~(FLAG(_collision_test_objects_bipeds_bit)|FLAG(_collision_test_objects_vehicles_bit)|
         FLAG(_collision_test_objects_machines_bit));
@@ -448,7 +698,7 @@ bool navigation_world_search_clear(void *context, struct sn_point a, uint32_t ap
        the segment from the start point to one of its own portals ignores it. */
     if (!(ap==bp && !(a.x==p->center.x && a.y==p->center.y && a.z==p->center.z) &&
         portal_edge(p,b)<SN_VERTICES_MAX && portal_edge(p,a)==SN_VERTICES_MAX) &&
-        blocked_pair(ap,bp)) return false;
+        blocked_pair(l,ap,bp)) return false;
     if (ap==bp) {
         if (a.x==p->center.x && a.y==p->center.y && a.z==p->center.z) {
             polygon=ap; edge=portal_edge(p,b); shift=0;
@@ -457,14 +707,24 @@ bool navigation_world_search_clear(void *context, struct sn_point a, uint32_t ap
         }
     }
     if (edge<SN_VERTICES_MAX) {
-        uint8_t state=(uint8_t)((world.edge_cache[polygon][edge]>>shift)&3);
-        if (state) { world.cache_hits++; return state==1; }
+        uint8_t state=(uint8_t)((l->edge_cache[polygon][edge]>>shift)&3);
+        if (state) { l->cache_hits++; return state==1; }
     }
-    world.sweeps++;
-    clear=sweep_clear(r,flags,*(long *)context,a,ap,b,bp);
+    l->sweeps++;
+    clear=sweep_clear(l,r,flags,*(long *)context,a,ap,b,bp);
     if (edge<SN_VERTICES_MAX)
-        world.edge_cache[polygon][edge]|=(uint8_t)((clear ? 1 : 2)<<shift);
+        l->edge_cache[polygon][edge]|=(uint8_t)((clear ? 1 : 2)<<shift);
     return clear;
+}
+bool navigation_world_search_clear(void *context, struct sn_point a, uint32_t ap,
+    struct sn_point b, uint32_t bp)
+{
+    return layer_search_clear(NAV_LAYER_FOOT,navigation_world_resource(),context,a,ap,b,bp);
+}
+bool navigation_world_vehicle_search_clear(void *context, struct sn_point a, uint32_t ap,
+    struct sn_point b, uint32_t bp)
+{
+    return layer_search_clear(NAV_LAYER_VEHICLE,navigation_world_vehicle_resource(),context,a,ap,b,bp);
 }
 
 #endif /* HALO_FEATURE_BOTS */

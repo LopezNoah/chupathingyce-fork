@@ -129,6 +129,9 @@ struct halo_player_controller
 	void (*update)(void);
 	/* whether this machine controls the player by program */
 	boolean (*controls_player)(long player_index);
+	/* game_engine.c: a factor, 0 to 1, on how good a starting location is
+	for the player (a controller's own spawning policy); NULL is 1 */
+	real (*starting_location_rating)(long player_index, union real_point3d const *position);
 };
 
 /* ---------- editors */
@@ -232,6 +235,8 @@ void halo_extensions_world_get_features(union real_point3d const *center, real r
 /* player controllers */
 void halo_extensions_update_player_controllers(void);
 boolean halo_extensions_player_is_computer_controlled(long player_index);
+/* the product of the controllers' factors, 0 to 1 */
+real halo_extensions_starting_location_rating(long player_index, union real_point3d const *position);
 
 /* editors */
 boolean halo_extensions_editor_active(void);

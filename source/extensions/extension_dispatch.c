@@ -307,6 +307,21 @@ boolean halo_extensions_player_is_computer_controlled(long player_index)
 	return FALSE;
 }
 
+real halo_extensions_starting_location_rating(long player_index, union real_point3d const *position)
+{
+	real rating = 1.f;
+
+	EACH_PART(e, player_controller)
+		if (e->player_controller->starting_location_rating)
+		{
+			real factor = e->player_controller->starting_location_rating(player_index, position);
+
+			/* (a factor outside 0 to 1, or not a number, is not trusted) */
+			rating *= factor >= 0.f && factor <= 1.f ? factor : 1.f;
+		}
+	return rating;
+}
+
 /* ---------- editors */
 
 static boolean editor_is_active(struct halo_editor const *editor)

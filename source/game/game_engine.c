@@ -7479,7 +7479,10 @@ real game_engine_get_starting_location_rating(
 	if (nearby_vehicle(player_index, starting_location))
 		return 0.0f;
 
-	return default_starting_location_rate_function(player_index, starting_location);
+	/* port: and as a player controller's spawning policy rates it
+	(extension_api.h; the bots' team halves) */
+	return default_starting_location_rate_function(player_index, starting_location) *
+		halo_extensions_starting_location_rating(player_index, &starting_location->position);
 }
 
 /* port: the gametype's vehicles of each team (game_variant_options) */

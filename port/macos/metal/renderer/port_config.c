@@ -226,6 +226,17 @@ static const struct config_setting config_settings[] =
 		"In first person, point the view where the player aims now instead of\n"
 		"where the last tick left it: the view turns the frame the mouse moves,\n"
 		"not up to two ticks (66 ms) later." },
+	{ "display.fov", _config_real, "0.0", "HALO_FOV", _environment_value, _platform_all,
+		"The first-person view's field of view on foot, in degrees across at\n"
+		"16:9 (20 to 150); 0 keeps the stock view. Vehicles, cinematics and\n"
+		"scripted cameras keep their own." },
+	{ "display.viewmodel_fov", _config_real, "0.0", "HALO_VIEWMODEL_FOV", _environment_value, _platform_all,
+		"The first-person weapon's and hands' field of view, in degrees across\n"
+		"at 16:9 (20 to 150); 0 keeps the weapon's stock view, also when\n"
+		"display.fov widens the world." },
+	{ "display.viewmodel_visible", _config_boolean, "true", "HALO_VIEWMODEL_VISIBLE", _environment_value, _platform_all,
+		"Draw the first-person weapon, hands and what is attached to them.\n"
+		"Off, they are not drawn; firing, animation, sound and lights go on." },
 	{ "display.high_res_hud", _config_boolean, "true", "HALO_HIGH_RES_HUD", _environment_value, _platform_all,
 		"Draw the HUD (meters, counters, panels, motion sensor, reticles,\n"
 		"waypoints, scopes) from the high-res assets (8x the maps' bitmaps);\n"
@@ -366,6 +377,8 @@ static const struct config_setting config_settings[] =
 		"Showing the scores (the controller's Back)." },
 	{ "controls.pause", _config_string, "\"Escape\"", "HALO_KEY_PAUSE", _environment_value, _platform_all,
 		"The pause menu (the controller's Start)." },
+	{ "controls.screenshot", _config_string, "\"F10\"", "HALO_KEY_SCREENSHOT", _environment_value, _platform_all,
+		"Save a PNG screenshot beside maps/ (press once per capture)." },
 
 	{ "game.console_log", _config_string, "\"important\"", "HALO_CONSOLE_LOG", _environment_value, _platform_all,
 		"What the game's console shows on screen of what it logs: \"important\"\n"
@@ -377,6 +390,12 @@ static const struct config_setting config_settings[] =
 	{ "game.language", _config_string, "\"\"", "HALO_LANGUAGE", _environment_value, _platform_all,
 		"The language the game asks the Xbox for: \"ja\", \"de\", \"fr\", \"es\" or \"it\";\n"
 		"empty for English. The game data decides what is translated." },
+	{ "game.enhanced_animations", _config_boolean, "true", "HALO_ENHANCED_ANIMATIONS", _environment_value, _platform_all,
+		"The player bipeds' grenade throws keep their legs moving (crouched,\n"
+		"in the air and in a vehicle's seat too), riders' hands leave the grips\n"
+		"to throw and reload, and a player turns with the aim while throwing;\n"
+		"false: the original animations, which freeze the legs and stand a\n"
+		"rider up." },
 
 	{ "game.downloaded_maps", _config_string, "\"\"", "HALO_DOWNLOADED_MAPS", _environment_value, _platform_all,
 		"Maps played as downloaded ones (until the game downloads maps itself):\n"
@@ -459,6 +478,18 @@ static const struct config_setting config_settings[] =
 		"in everyone's server browser: anyone can see and join it) or, false,\n"
 		"PRIVATE (only players with its invite link can join). Server Setup's\n"
 		"LISTING changes it for each game." },
+	{ "network.votekick", _config_boolean, "true", "HALO_NET_VOTEKICK", _environment_value, _platform_all,
+		"Hosting: let the players vote to kick a player (the scoreboard's\n"
+		"right-click, or the console's votekick). More than half of the players\n"
+		"must vote, counted once per address." },
+	{ "network.votekick_minutes", _config_integer, "5", "HALO_NET_VOTEKICK_MINUTES", _environment_value,
+		_platform_all,
+		"Hosting: the minutes a player must have played on this server to start\n"
+		"a vote to kick (0 to 60); to vote, 2 minutes or this, the less." },
+	{ "network.votekick_ban_minutes", _config_integer, "30", "HALO_NET_VOTEKICK_BAN_MINUTES", _environment_value,
+		_platform_all,
+		"Hosting: the minutes a player kicked by a vote cannot join again (1 to\n"
+		"1440)." },
 	{ "network.coop_public", _config_boolean, "false", "HALO_NET_COOP_PUBLIC", _environment_value, _platform_all,
 		"Whether an online co-op game (Create Game > Internet, a SINGLEPLAYER\n"
 		"map) starts as PUBLIC or, false, PRIVATE: Server Setup's LISTING in\n"
@@ -577,6 +608,10 @@ static const struct config_setting config_settings[] =
 	{ "debug.network_test_score", _config_integer, "0", "HALO_NETWORK_TEST_SCORE", _environment_value, _platform_all,
 		"The score an automated test host's game type plays to (a short game, to\n"
 		"test the next); 0 the game type's own." },
+	{ "debug.network_test_loadout", _config_string, "\"map\"", "HALO_NETWORK_TEST_LOADOUT", _environment_value, _platform_all,
+		"Starting loadout for automated network tests: \"map\" leaves the game\n"
+		"type's weapons alone; \"rifle_pistol\" gives players an assault rifle\n"
+		"and Magnum instead of the map's starting equipment." },
 	{ "debug.network_test_shoot", _config_real, "0.0", "HALO_NETWORK_TEST_SHOOT", _environment_value, _platform_all,
 		"Every this many seconds each automated test player hits the next with\n"
 		"their weapon, within its reach (the host brings far players near the\n"

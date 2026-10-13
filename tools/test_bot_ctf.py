@@ -46,6 +46,8 @@ def test_ctf_snapshot_and_goals():
     functions += "\n" + "\n".join(body(manager, name) for name in (
         "bot_manager_ambition_allowed", "bot_manager_claim_scope", "bot_manager_claim_item",
         "bot_manager_item_claimed_by_other", "bot_manager_release_item", "bot_manager_release_bot",
+        "bot_manager_seat_key", "bot_manager_claim_seat", "bot_manager_seat_claimed_by_other",
+        "bot_manager_vehicle_claimed_by_other", "bot_manager_release_seat",
         "bot_manager_ctf_goal", "bot_manager_ctf_add", "bot_manager_ctf_observe", "bot_manager_publish_ctf", "bot_manager_publish_ambitions"))
     fixture = (ROOT / "tools/test_bot_ctf_snapshot.c.in").read_text()
     fixture = fixture.replace("/* HEADERS */", header("port/linux/include/halo_bot_objectives.h") +

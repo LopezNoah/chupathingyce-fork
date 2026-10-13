@@ -33,6 +33,14 @@ for LAN or online matches**. Games bots have participated in are excluded from
 game-list/Delta Stats reporting. This is not a substitute for disabling public
 hosting/listing when running a private test.
 
+A new bot first gets its bearings: for a moment after spawning (its skill's
+`orient_seconds`, 0.8 s for a Spartan to 1.8 s for a Recruit, randomly up to
+1.6 times that) it stands and looks to either side of where it faces. It notices
+no enemy meanwhile, and is not told of teammates' sightings; being hurt ends it
+at once. In team games with bots, each team spawns in its own half of the map
+(`bots.team_spawns`, on by default), so teams no longer start in each other's
+bases.
+
 A utility selector scores VEHICLE, RETREAT, SCAVENGE, FIGHT and lane PATROL from
 the bot's confidence, target and opportunities. It uses hysteresis to avoid
 thrashing and decides every eight ticks, staggered across bots. The combat and
@@ -99,12 +107,18 @@ target's live destination. The AI does not yet plan a route through teleporter
 pairs.
 
 Bots seek empty seats in parked ground vehicles and fixed turrets, never evict
-occupants, and prefer a gunner seat when a friendly driver is present. They can
-drive supported ground vehicles, man turrets, and use an available passenger
-seat. When a driver has no contact to pursue and an extra seat is open, it steers
-toward a nearby teammate and stops so the teammate can board normally. There is
-no supported horn input, so the invitation is behavioral/logged rather than an
-audible signal. Aircraft are excluded; there is no vehicle navmesh, advanced
+occupants, and prefer a gunner seat when a friendly driver is present. One bot
+per team heads for each seat (a seat claim, renewed every tick and released
+when the bot gives up, dies or gets in): once a teammate is on the way to the
+driver's seat, the others take the gunner's and passenger's seats or look for
+something else, instead of all running for the wheel. A bot whose seat is taken
+on the way takes another free seat of that vehicle or gives it up. Claims never
+stop a human taking a seat. A new driver waits for boarding teammates (bots
+holding a seat claim, or a human teammate on foot within 6 m with a seat open)
+for at most eight seconds, then drives. With no contact to pursue it drives to a
+place under open sky between the two bases, 30 to 75 percent of the way to the
+enemy's, choosing another on arrival or after 25 seconds. There is no supported
+horn input. Aircraft are excluded; there is no vehicle navmesh, advanced
 driving, obstacle avoidance or crew role assignment.
 
 No objective play or cross-machine replication is claimed. Objective variants

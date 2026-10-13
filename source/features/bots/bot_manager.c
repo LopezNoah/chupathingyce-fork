@@ -56,6 +56,8 @@ static struct
 	struct bot_ambition ambitions[BOT_AMBITIONS_MAXIMUM];
 	struct bot_sighting sightings[BOT_MANAGER_TEAMS][HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
 	struct engine_ai_claims item_claims;
+	/* port: vehicle seats, keyed by bot_manager_seat_key */
+	struct engine_ai_claims seat_claims;
 	/* port: transition-only evidence of actual engine ownership and scoring. */
 	boolean ctf_observed;
 	struct halo_bot_ctf_snapshot ctf_previous;
@@ -75,6 +77,7 @@ void bot_manager_reset(
 
 	csmemset(&bot_manager_globals, 0, sizeof(bot_manager_globals));
 	engine_ai_claims_reset(&bot_manager_globals.item_claims);
+	engine_ai_claims_reset(&bot_manager_globals.seat_claims);
 	human_callouts_reset(); /* port: no contacts survive map/game resets */
 	for (team_index = 0; team_index < BOT_MANAGER_TEAMS; team_index++)
 	{
@@ -281,6 +284,90 @@ void bot_manager_release_bot(
 		return;
 	engine_ai_claims_release_owner(&bot_manager_globals.item_claims, claim_scope,
 		(uint32_t)bot_number);
+	engine_ai_claims_release_owner(&bot_manager_globals.seat_claims, claim_scope,
+		(uint32_t)bot_number);
+}
+
+/* A seat's claim key: the vehicle's absolute index and the seat (below
+BOT_MANAGER_SEATS). The salt is not in it: a claim outlives its vehicle by at
+most its short duration, and a replacement in the same place is the same
+seat to a teammate. */
+static boolean bot_manager_seat_key(
+	long vehicle_index,
+	short seat_index,
+	uint32_t *key)
+{
+	assert(key);
+	if (vehicle_index == NONE || seat_index < 0 || seat_index >= BOT_MANAGER_SEATS)
+		return FALSE;
+	*key = (uint32_t)DATUM_INDEX_TO_ABSOLUTE_INDEX(vehicle_index) * BOT_MANAGER_SEATS + (uint32_t)seat_index;
+	return TRUE;
+}
+
+boolean bot_manager_claim_seat(
+	long team_index,
+	long vehicle_index,
+	short seat_index,
+	short bot_number,
+	long duration_ticks)
+{
+	long now = game_time_get();
+	uint32_t claim_scope;
+	uint32_t key;
+
+	if (bot_number <= 0 || duration_ticks <= 0 || now < 0 ||
+		!bot_manager_seat_key(vehicle_index, seat_index, &key) ||
+		!bot_manager_claim_scope(team_index, &claim_scope))
+		return FALSE;
+	return engine_ai_claims_acquire(&bot_manager_globals.seat_claims, claim_scope,
+		key, (uint32_t)bot_number, (uint64_t)now, (uint64_t)duration_ticks);
+}
+
+boolean bot_manager_seat_claimed_by_other(
+	long team_index,
+	long vehicle_index,
+	short seat_index,
+	short bot_number)
+{
+	long now = game_time_get();
+	uint32_t claim_scope;
+	uint32_t key;
+
+	if (bot_number <= 0 || now < 0 ||
+		!bot_manager_seat_key(vehicle_index, seat_index, &key) ||
+		!bot_manager_claim_scope(team_index, &claim_scope))
+		return FALSE;
+	return engine_ai_claims_held_by_other(&bot_manager_globals.seat_claims, claim_scope,
+		key, (uint32_t)bot_number, (uint64_t)now);
+}
+
+boolean bot_manager_vehicle_claimed_by_other(
+	long team_index,
+	long vehicle_index,
+	short bot_number)
+{
+	short seat_index;
+
+	/* (BOT_MANAGER_SEATS lookups) */
+	for (seat_index = 0; seat_index < BOT_MANAGER_SEATS; seat_index++)
+		if (bot_manager_seat_claimed_by_other(team_index, vehicle_index, seat_index, bot_number))
+			return TRUE;
+	return FALSE;
+}
+
+void bot_manager_release_seat(
+	long team_index,
+	long vehicle_index,
+	short seat_index,
+	short bot_number)
+{
+	uint32_t claim_scope;
+	uint32_t key;
+
+	if (bot_number <= 0 || !bot_manager_seat_key(vehicle_index, seat_index, &key) ||
+		!bot_manager_claim_scope(team_index, &claim_scope))
+		return;
+	engine_ai_claims_release(&bot_manager_globals.seat_claims, claim_scope, key, (uint32_t)bot_number);
 }
 
 /* port: Goals are rebuilt every tick, but identity is kind/team/salted datum,

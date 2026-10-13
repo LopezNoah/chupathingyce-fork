@@ -12,6 +12,7 @@ checks, blockage recovery and team lane targets.
 #pragma once
 
 #include "cseries/cseries.h"
+#include "math/real_math.h"
 #include "engine_ai/behavior_intent.h"
 #include "engine_ai/surface_navigation_jobs.h"
 
@@ -77,6 +78,14 @@ enum bot_navigation_result
 	BOT_NAVIGATION_ARRIVED,
 	BOT_NAVIGATION_FAILED,
 };
+
+/* Where team 0's or 1's base is, and the enemy's: the map's CTF flags, else
+ * the average of each team's starting locations. FALSE for another team, or a
+ * map with neither. */
+boolean bot_navigation_team_bases(
+	long team_index,
+	real_point3d *home,
+	real_point3d *enemy);
 
 /* Drop every queued and running search: before a map, BSP or game-state
  * change, and with a new map's bots. Agents still searching ask again. */

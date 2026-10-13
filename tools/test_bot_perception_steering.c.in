@@ -47,6 +47,7 @@ static struct { struct bot_skill *skill; } bots_globals;
 struct sn_point { real x,y,z; };
 struct bot {
     long unit_index,player_index,target_player_index,target_last_seen_time,target_first_seen_time;
+    long aware_time;
     long target_observed_player_index,target_observed_time;
     short slot,visible_enemy_count;
     int target_source,chosen_leaf;
@@ -218,6 +219,27 @@ static void perception_tests(void) {
     positions[1].x=20.f;
     bot_perceive(&b,&players[0],&units[0]);
     assert(!b.target_visible && b.target_source==_bot_target_shared && b.target_last_position.x==4.f && callouts==0);
+    /* A bot getting its bearings after spawning notices nobody: no sighting,
+       no callout, no line-of-sight test, no teammate's sighting. */
+    b=fresh(); b.aware_time=now+30;
+    bot_perceive(&b,&players[0],&units[0]);
+    assert(b.target_player_index==NONE && !b.target_visible && callouts==0 && los_calls==0);
+    shared=TRUE; bot_perceive(&b,&players[0],&units[0]);
+    assert(b.target_player_index==NONE && b.target_source==_bot_target_none);
+    /* The last tick of it is still orienting; the next sees the enemy. */
+    shared=FALSE; now=b.aware_time-1; bot_perceive(&b,&players[0],&units[0]);
+    assert(b.target_player_index==NONE);
+    now=b.aware_time; bot_perceive(&b,&players[0],&units[0]);
+    assert(b.target_visible && b.target_source==_bot_target_seen && b.target_first_seen_time==now);
+    /* Being hurt ends it at once: the attacker is known (not seen), and the
+       reaction time counts from now. */
+    b=fresh(); b.aware_time=now+30;
+    units[0].unit.attackers[0].player_index=1; units[0].unit.attackers[0].game_time_stamp=now;
+    bot_perceive(&b,&players[0],&units[0]);
+    assert(b.aware_time==now && b.target_source==_bot_target_attacker && !b.target_visible);
+    assert(b.target_first_seen_time==now && callouts==0);
+    now++; bot_perceive(&b,&players[0],&units[0]);
+    assert(b.target_visible && b.target_source==_bot_target_seen);
 }
 #ifndef PERCEPTION_ONLY
 static void steering_tests(void) {

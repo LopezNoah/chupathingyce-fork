@@ -368,35 +368,26 @@ CTF flags, which a map places in its bases whatever the game type. A map with
 no flags falls back to the average team start locations, which on a map like
 Blood Gulch are spread far from the bases (a 22.6 m axis between flags 97.6 m
 apart), so the flags come first. */
-static boolean bot_nav_lane_axis(
+boolean bot_navigation_team_bases(
 	long team_index,
 	real_point3d *home,
-	real *forward_x,
-	real *forward_y,
-	real *length)
+	real_point3d *enemy)
 {
 	short count = player_get_starting_location_count();
 	short index;
 	long enemy_team = team_index == 0 ? 1 : 0;
 	long home_count = 0;
 	long enemy_count = 0;
-	real_point3d enemy;
-	real dx;
-	real dy;
 
+	if (!home || !enemy || (team_index != 0 && team_index != 1))
+		return FALSE;
 	csmemset(home, 0, sizeof(*home));
-	csmemset(&enemy, 0, sizeof(enemy));
-	if (map_anchors_team_base(team_index, home) && map_anchors_team_base(enemy_team, &enemy))
-	{
-		home_count = 1;
-		enemy_count = 1;
-		count = 0;
-	}
-	else
-	{
-		csmemset(home, 0, sizeof(*home));
-		csmemset(&enemy, 0, sizeof(enemy));
-	}
+	csmemset(enemy, 0, sizeof(*enemy));
+	if (map_anchors_team_base(team_index, home) && map_anchors_team_base(enemy_team, enemy))
+		return TRUE;
+	csmemset(home, 0, sizeof(*home));
+	csmemset(enemy, 0, sizeof(*enemy));
+	/* (at most the scenario's starting locations, a tag block's count) */
 	for (index = 0; index < count; index++)
 	{
 		struct player_starting_location const *location = player_get_starting_location(index);
@@ -412,9 +403,9 @@ static boolean bot_nav_lane_axis(
 		}
 		else if (location->team_index == enemy_team)
 		{
-			enemy.x += location->position.x;
-			enemy.y += location->position.y;
-			enemy.z += location->position.z;
+			enemy->x += location->position.x;
+			enemy->y += location->position.y;
+			enemy->z += location->position.z;
 			enemy_count++;
 		}
 	}
@@ -423,9 +414,25 @@ static boolean bot_nav_lane_axis(
 	home->x /= (real)home_count;
 	home->y /= (real)home_count;
 	home->z /= (real)home_count;
-	enemy.x /= (real)enemy_count;
-	enemy.y /= (real)enemy_count;
-	enemy.z /= (real)enemy_count;
+	enemy->x /= (real)enemy_count;
+	enemy->y /= (real)enemy_count;
+	enemy->z /= (real)enemy_count;
+	return TRUE;
+}
+
+static boolean bot_nav_lane_axis(
+	long team_index,
+	real_point3d *home,
+	real *forward_x,
+	real *forward_y,
+	real *length)
+{
+	real_point3d enemy;
+	real dx;
+	real dy;
+
+	if (!bot_navigation_team_bases(team_index, home, &enemy))
+		return FALSE;
 	dx = enemy.x - home->x;
 	dy = enemy.y - home->y;
 	*length = square_root(dx * dx + dy * dy);
