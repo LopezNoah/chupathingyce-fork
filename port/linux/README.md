@@ -15,35 +15,49 @@ You do not need the Xbox SDK. The declarations that the game uses are in
 
 To build:
 
-- Python and ninja.
-- clang. The option `--linux-cc` of `configure.py` selects a different
+- Python and ninja (`python3` and `ninja-build` on Debian and Ubuntu,
+  `python` and `ninja` on Arch Linux).
+- clang and lld. A release build is optimised with the profiles in `pgo/`
+  only with clang 22, the version that wrote them; with an older clang it
+  is built without them. Debian and Ubuntu get clang 22 from
+  [apt.llvm.org](https://apt.llvm.org) (`clang-22`, `lld-22`, `llvm-22`);
+  put `/usr/lib/llvm-22/bin` first on `PATH`, or give `configure.py` the
+  compiler with `--linux-cc clang-22`. Arch Linux has it as `clang` and
+  `lld`. The option `--linux-cc` of `configure.py` selects a different
   compiler.
-- The 32-bit glibc development files: `lib32-glibc` on Arch Linux,
-  `gcc-multilib` and `libc6-dev-i386` on Debian and Ubuntu.
-- The 32-bit SDL3: `lib32-sdl3` on Arch Linux, `libsdl3-dev:i386` on Debian
-  and Ubuntu. The portable build does not need it: refer to "Portable
+- The 32-bit glibc development files: `gcc-multilib` and `libc6-dev-i386`
+  on Debian and Ubuntu, `lib32-glibc` on Arch Linux.
+- The 32-bit SDL3: `libsdl3-dev:i386` on Debian and Ubuntu, `lib32-sdl3` on
+  Arch Linux. The portable build does not need it: refer to "Portable
   build".
 
 To start the game:
 
 - glibc 2.31 or later (32-bit), for the builds from GitHub Actions, which
   are built against glibc 2.31. They should start on Debian 11, Ubuntu
-  20.04, Fedora 32, SteamOS 3 and later distributions. A build that you
+  20.04, Fedora 32 and later distributions. A build that you
   make without `--portable` needs the glibc of the computer that built it,
   or a later one.
-- The 32-bit OpenGL libraries (`lib32-mesa`).
-- The 32-bit PipeWire or PulseAudio client libraries (`lib32-pipewire` or
-  `lib32-libpulse`).
-- The 32-bit X11 libraries (`lib32-libx11`, `lib32-libxext`). In a Wayland
-  session, the game uses them through XWayland. SDL uses Wayland itself
-  only if the 32-bit Wayland libraries are version 1.20 or later
-  (`lib32-wayland`, `lib32-libxkbcommon`; Debian 11, Ubuntu 20.04 and
-  Fedora 32 have older ones) and the compositor has the fifo-v1 protocol.
-  On GNOME, the window then has borders only with the 32-bit libdecor
-  (`lib32-libdecor`).
+- The 32-bit OpenGL libraries: `libgl1:i386` and `libgl1-mesa-dri:i386`
+  on Debian and Ubuntu, `lib32-mesa` on Arch Linux.
+- The 32-bit PipeWire or PulseAudio client libraries:
+  `libpipewire-0.3-0:i386` or `libpulse0:i386` on Debian and Ubuntu,
+  `lib32-pipewire` or `lib32-libpulse` on Arch Linux.
+- The 32-bit X11 libraries: `libx11-6:i386` and `libxext6:i386` on Debian
+  and Ubuntu, `lib32-libx11` and `lib32-libxext` on Arch Linux. In a
+  Wayland session, the game uses them through XWayland. SDL uses Wayland
+  itself only if the 32-bit Wayland libraries are version 1.20 or later
+  (`libwayland-client0:i386`, `libwayland-cursor0:i386`,
+  `libwayland-egl1:i386` and `libxkbcommon0:i386` on Debian and Ubuntu,
+  `lib32-wayland` and `lib32-libxkbcommon` on Arch Linux; Debian 11,
+  Ubuntu 20.04 and Fedora 32 have older ones) and the compositor has the
+  fifo-v1 protocol. On GNOME, the window then has borders only with the
+  32-bit libdecor (`libdecor-0-0:i386` on Debian and Ubuntu,
+  `lib32-libdecor` on Arch Linux).
 
-SteamOS has all of these. Its system is read-only, and the builds from
-GitHub Actions need no package: they bring their own SDL3
+On Debian and Ubuntu, the 32-bit packages need the i386 architecture
+first: `sudo dpkg --add-architecture i386 && sudo apt update`. The builds
+from GitHub Actions need no SDL3 package: they bring their own
 (`libSDL3.so.0`, next to the executable).
 
 ### Portable build
@@ -77,8 +91,9 @@ for the 64-bit build). `tools/linux_sysroot.cmake` (`tools/linux64_sysroot.cmake
 builds SDL against it.
 
 To make the portable build you need, in addition to the tools above,
-CMake, `pkg-config` (`pkgconf`) and `wayland-scanner` (`wayland` on Arch
-Linux, `libwayland-bin` on Debian and Ubuntu). You do not need the
+CMake, `pkg-config` and `wayland-scanner`: `cmake`, `pkg-config` and
+`libwayland-bin` on Debian and Ubuntu, `cmake`, `pkgconf` and `wayland` on
+Arch Linux. You do not need the
 system's SDL3. You need the 32-bit glibc only for the tests.
 
 To see the glibc version that a build needs, enter
@@ -89,9 +104,25 @@ Linux executable and library they make, fails on any version later than
 
 ## Build the game
 
-1. Go to the root folder of the repository.
-2. Enter `python configure.py`.
-3. Enter `ninja linux`.
+1. Install the tools. On Debian and Ubuntu, after adding apt.llvm.org's
+   `llvm-toolchain-<release>-22` repository (its instructions are at
+   [apt.llvm.org](https://apt.llvm.org); its script does it with
+   `sudo ./llvm.sh 22`), enter:
+
+   ```sh
+   sudo apt install clang-22 lld-22 llvm-22 gcc-multilib libc6-dev-i386 \
+     python3 ninja-build cmake pkg-config libwayland-bin
+   export PATH=/usr/lib/llvm-22/bin:$PATH
+   ```
+
+   On Arch Linux, enable the multilib repository and enter
+   `sudo pacman -S clang lld lib32-glibc python ninja cmake pkgconf wayland`.
+   GitHub Actions builds on Ubuntu 24.04 this way
+   (`.github/workflows/build.yml`).
+2. Go to the root folder of the repository.
+3. Enter `python3 configure.py` (with `--portable` for a build that
+   starts on other computers, as the releases are: "Portable build").
+4. Enter `ninja linux`.
 
 ### 64-bit
 
@@ -99,8 +130,8 @@ Linux executable and library they make, fails on any version later than
 `build/linux64/halo`, the way the macOS build does (the 64-bit build in
 [port/macos/README.md](../macos/README.md): `HALO_64BIT` and the `long`
 rewrite, `tools/lp64_build.py`). It needs the 64-bit glibc and SDL3
-development files (`sdl3` on Arch Linux, `libsdl3-dev` on Debian 13 and
-Ubuntu 25.04 or later) instead of the 32-bit ones, and the 64-bit OpenGL and
+development files (`libsdl3-dev` on Debian 13 and Ubuntu 25.04 or later,
+`sdl3` on Arch Linux) instead of the 32-bit ones, and the 64-bit OpenGL and
 sound libraries to start. An SDL3 built by hand is found through
 `LIBRARY_PATH` when linking and `LD_LIBRARY_PATH` when starting. With
 `--portable`, as the releases are built, it needs neither: it is built
