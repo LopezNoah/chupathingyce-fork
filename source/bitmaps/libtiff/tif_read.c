@@ -32,6 +32,10 @@ static char data_002db040[] = "$Header: /usr/people/sam/tiff/libtiff/RCS/tif_rea
  */
 #include "tiffioP.h"
 
+/* port: debug_memory.c's, called here undeclared, which WebAssembly cannot do
+with another type than its own */
+void debug_free(void *pointer, const char *file, long line);
+
 static int TIFFSeek(
 	TIFF *tif,
 	u_int row,

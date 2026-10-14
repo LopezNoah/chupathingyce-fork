@@ -44,9 +44,9 @@ from typing import Any, Dict, List, Optional
 from .android_build import VARIADIC_PROTOTYPE_FILES
 from .embed_assets import hud_assets_build, hud_configure_inputs
 from .linux_build import (EXPAT_DIR, EXPAT_SOURCES, KCP_DIR, MONOCYPHER_DIR, MUSL_MATH_DIR, TOML_DIR, XDK_INCLUDE,
-                          ZLIB_DEFINES, ZLIB_DIR, ZLIB_SOURCES, compile_launcher, configuration_defines,
+                          ZLIB_DEFINES, ZLIB_DIR, ZLIB_SOURCES, CUSTOM_EDITION_DEFINES, compile_launcher, feature_defines,
                           game_defines_and_includes, game_sources, musl_math_cflags, musl_math_sources,
-                          opus_cflags, opus_sources, updater_defines, xdk_headers)
+                          updater_defines, xdk_headers)
 from .ninja_syntax import Writer
 
 PORT_DIR = Path("port/web")
@@ -159,6 +159,21 @@ def site_sources() -> List[Path]:
     return sorted(path for path in (PORT_DIR / "site").rglob("*") if path.is_file())
 
 
+def configuration_defines(sln: Any) -> List[str]:
+    """what configure.py's options define for every unit: --release (no
+    assertions), --profile (the profiling build's recording), and the
+    features configure.py turned on (tools/linux_build.py feature_defines)"""
+    defines = []
+    if getattr(sln, "port_release", False):
+        defines.append("-DHALO_RELEASE")
+    if getattr(sln, "port_profile", False):
+        defines.append("-DHALO_PROFILE")
+    # (Custom Edition maps' code, as every build has it: linux_build.py
+    # CUSTOM_EDITION_DEFINES; their tag cache is never mapped here, so they
+    # are refused when they load, port/linux/src/xbox_memory.c)
+    return defines + feature_defines(sln) + CUSTOM_EDITION_DEFINES
+
+
 def web_configure_inputs() -> List[Path]:
     return [Path(__file__), PORT_DIR / "src", PORT_DIR / "site", PORT_DIR / "site" / "icons", SDL_PORT,
             *hud_configure_inputs()]
@@ -229,7 +244,7 @@ def generate_web_build(n: Writer, sln: Any) -> None:
         f"-iquote {Path(config['game_sources'])}",
         game_defines_and_includes(config), f"-idirafter {XDK_INCLUDE}",
     ])
-    for source in game_sources(config):
+    for source in game_sources(config, sln):
         name = source.as_posix()
         cflags = game_cflags
         if name == "source/main/main.c":
@@ -269,6 +284,10 @@ def generate_web_build(n: Writer, sln: Any) -> None:
     for source in sorted((PORT_DIR / "src").glob("*.c")):
         add_object(source, posix_cflags if source.name in WEB_POSIX_SOURCES else platform_cflags)
     add_object(WATCH_HASH, " ".join([abi, "-std=gnu11", "-w"]))
+    # the trace's ring and capture (engine/core/trace; posix_trace.c), as the
+    # other builds have them
+    for source in (Path("engine/core/trace/trace.c"), Path("engine/core/trace/trace_capture.c")):
+        add_object(source, posix_cflags)
 
     # ---------- third-party libraries, as the other builds have them
 
@@ -276,8 +295,6 @@ def generate_web_build(n: Writer, sln: Any) -> None:
     for name in EXPAT_SOURCES:
         add_object(EXPAT_DIR / name, " ".join([abi, "-std=gnu11", f"-I{EXPAT_DIR}", "-w"]))
     add_object(KCP_DIR / "ikcp.c", " ".join([abi, "-std=gnu11", "-w"]))
-    for source in opus_sources():
-        add_object(source, opus_cflags(abi))
     for name in ("monocypher.c", "monocypher-ed25519.c"):
         add_object(MONOCYPHER_DIR / name, " ".join([abi, "-std=gnu11", "-w"]))
     for name in ZLIB_SOURCES:
@@ -295,7 +312,7 @@ def generate_web_build(n: Writer, sln: Any) -> None:
         "-O2", "-g2", "-pthread", sdl_flag,
         # a call that does not match its callee's type is an error, not a
         # trap when it runs
-        "-Wl,--fatal-warnings",
+        "-Wl,--fatal-warnings", "-Wl,--error-limit=0",
         # the game's main on a thread of its own, where it may block; the
         # page's thread only passes events
         "-sPROXY_TO_PTHREAD=1",

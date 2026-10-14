@@ -284,7 +284,6 @@ static void crash_reports_start(void)
 	posix_crash_send();
 }
 #endif
-#endif
 
 BOOL platform_sdl_initialize(void)
 {

@@ -153,6 +153,12 @@ extern	void TIFFUnmapFileContents();
 #ifdef applec
 #define	lseek	mpw_lseek
 extern long mpw_lseek(int, long, int);
+#elif defined(HALO_WEB)
+/* port: WebAssembly calls a function only with its own type, and the C
+library's lseek takes and returns a 64-bit offset: the MSVC runtime's
+_lseek, with this one's (port/linux/src/msvc_crt.c) */
+#define	lseek	_lseek
+extern long _lseek(int, long, int);
 #else
 extern	long lseek();
 #endif

@@ -406,6 +406,8 @@ symbols in this file:
 #include "interface/player_ui.h"
 #include "interface/marketing_and_strategic_business_development.h"
 #include "extensions/extension_api.h"
+#elif defined(HALO_WEB)
+#include "extensions/extension_api.h" /* port: its calls' types, which WebAssembly calls them by */
 #endif
 
 /* ---------- constants */

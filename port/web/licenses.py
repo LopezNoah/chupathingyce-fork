@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # what each notice is for, and its file
 NOTICES = [
     ("Expat (the menus' XML)", "port/third_party/expat/COPYING"),
-    ("Opus (voice chat's codec)", "port/third_party/opus/COPYING"),
     ("zlib", "port/third_party/zlib/LICENSE"),
     ("KCP (internet play's streams)", "port/third_party/kcp/LICENSE"),
     ("Monocypher (internet play's signatures)", "port/third_party/monocypher/LICENCE.md"),
@@ -25,7 +24,6 @@ NOTICES = [
     ("Overpass (the menus' text and the page's)", "port/assets/fonts/Overpass-OFL.txt"),
     ("OpenCE (the title font, from Newtown)", "port/assets/fonts/OpenCE-OFL.txt"),
     ("Newtown", "port/assets/fonts/Newtown-LICENSE.txt"),
-    ("Lucide (voice chat's speaker icons)", "port/assets/icons/lucide/LICENSE"),
 ]
 
 
