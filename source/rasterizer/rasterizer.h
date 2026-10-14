@@ -12,6 +12,7 @@ header included in hcex build.
 
 #include "real_math.h"
 #include "render_cameras.h"
+#include "halo_port_capacity.h" /* port: the native builds' larger rasterizer limits */
 
 /* ---------- constants */
 
@@ -31,7 +32,8 @@ enum
 	RASTERIZER_MAXIMUM_TRIANGLES_PER_TRIANGLE_BUFFER = 24576,
 	RASTERIZER_MAXIMUM_DEBUG_PRIMITIVES = 131072,
 	RASTERIZER_MAXIMUM_DEBUG_VERTICES = 393216,
-	RASTERIZER_MAXIMUM_TRANSPARENT_GEOMETRY_GROUPS = 384,
+	/* port: native builds allow more transparent geometry groups */
+	RASTERIZER_MAXIMUM_TRANSPARENT_GEOMETRY_GROUPS = HALO_PORT_MAXIMUM_TRANSPARENT_GEOMETRY_GROUPS,
 	RASTERIZER_MAXIMUM_TRANSPARENT_GEOMETRY_GROUPS2 = 32,
 	/* the native builds' (halo_port_capacity.h: the Xbox's 32768 on Android
 	and the Xbox builds) */

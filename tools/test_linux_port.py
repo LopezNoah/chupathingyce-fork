@@ -371,6 +371,78 @@ def test_p2p_signatures_and_listings(tmp_path):
     assert "PASS" in result.stdout
 
 
+# A small executable around port_config.c: repeated TOML sections are joined
+# before parsing, preserving settings from every occurrence.
+CONFIG_PROGRAM = r"""
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include "port_config.h"
+
+void platform_log(const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    vfprintf(stderr, format, arguments);
+    va_end(arguments);
+    fputc('\n', stderr);
+}
+
+int main(int argc, char **argv)
+{
+    char value[256];
+    if (argc != 2 || !config_text(argv[1], value, sizeof(value)))
+        return 1;
+    puts(value);
+    return 0;
+}
+"""
+
+
+def test_config_joins_repeated_sections(tmp_path, monkeypatch):
+    compiler = shutil.which("clang")
+    if not compiler:
+        pytest.skip("needs clang")
+    root = Path(__file__).resolve().parent.parent
+    stubs = tmp_path / "stubs"
+    (stubs / "SDL3").mkdir(parents=True)
+    (stubs / "SDL3" / "SDL.h").write_text("#include <strings.h>\n#define SDL_strncasecmp strncasecmp\n")
+    (stubs / "platform.h").write_text("void platform_log(const char *format, ...);\n")
+    for name in ("port_config.c", "port_config.h"):
+        shutil.copy(root / "port/linux/src" / name, stubs / name)
+    source = write(tmp_path / "main.c", CONFIG_PROGRAM)
+    program = tmp_path / "config_program"
+    subprocess.run([
+        compiler, "-DHALO_ANDROID=1", "-DHALO_ARM64_GUEST=1", "-U__APPLE__",
+        "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+        f"-I{stubs}", f"-I{root / 'port/third_party/tomlc17'}", "-pthread", "-o", str(program),
+        str(source), str(stubs / "port_config.c"), str(root / "port/third_party/tomlc17/tomlc17.c"),
+    ], check=True)
+    data = tmp_path / "data"
+    data.mkdir()
+    config = data / "config.toml"
+    config.write_text(
+        'config_version = 2\n\n[display]\nvsync = false\n\n[game]\nconsole_log = "all"\n\n'
+        '[display]\nhigh_res_text = false\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HALO_DATA_ROOT", str(data))
+    monkeypatch.setenv("ASAN_OPTIONS", "detect_leaks=0")
+    for name in ("HALO_NO_VSYNC", "HALO_HIGH_RES_TEXT", "HALO_CONSOLE_LOG"):
+        monkeypatch.delenv(name, raising=False)
+
+    def get(name):
+        result = subprocess.run([str(program), name], capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+
+    assert get("display.vsync") == "false"
+    assert get("display.high_res_text") == "false"
+    assert get("game.console_log") == "all"
+    sections = re.findall(r"^\[([a-z_]+)\]$", config.read_text(encoding="utf-8"), re.M)
+    assert sections.count("display") == 1, sections
+    assert len(sections) == len(set(sections)), sections
+
+
 # ---------- the tag validator (port/linux/game/tag_validate.c)
 
 RETAIL_MAPS = Path("assets/maps")

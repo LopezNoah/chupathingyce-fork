@@ -140,4 +140,12 @@ without its widget */
 #define HALO_PORT_MAXIMUM_LIGHTS_PER_MAP 4096 /* (896) */
 #define HALO_PORT_MAXIMUM_GAME_LOOPING_SOUNDS 4096 /* (1024) */
 
+/* A frame's transparent geometry groups: model parts, widgets, batches of
+particles and transparent structure surfaces. The Xbox's 384 limit could
+truncate crowded native scenes. Each group is 160 bytes. */
+#define HALO_PORT_MAXIMUM_TRANSPARENT_GEOMETRY_GROUPS 2048 /* (384) */
+
+typedef char halo_port_transparent_geometry_capacity_positive_assert[
+	HALO_PORT_MAXIMUM_TRANSPARENT_GEOMETRY_GROUPS > 0 ? 1 : -1];
+
 #endif /* __HALO_PORT_CAPACITY_H */
