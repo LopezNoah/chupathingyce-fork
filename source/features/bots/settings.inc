@@ -46,3 +46,26 @@ written grouped by section. */
 		"Solo Team Slayer bot test fixture (requires three bots): seat the local\n"
 		"player in a parked Warthog and place teammate Bot 2 near the gunner entrance\n"
 		"once per map. The bot must approach and enter normally; off in normal play." },
+	{ "debug.bot_scenario", _config_string, "\"\"", "HALO_BOT_SCENARIO", _environment_value, _platform_all,
+		"Controlled bot behavior tests (docs/bot-scenarios.md): \"S01,S02\" or \"all\".\n"
+		"A walled arena is built above the map (64-bit desktop builds), and each trial\n"
+		"places a bot and its scripted targets; a camera follows it. Empty: off." },
+	{ "debug.bot_scenario_skills", _config_string, "\"spartan\"", "HALO_BOT_SCENARIO_SKILLS", _environment_value, _platform_all,
+		"The skills each scenario runs with, in order: \"recruit,marine,odst,spartan\" or \"all\"." },
+	{ "debug.bot_scenario_trials", _config_integer, "1", "HALO_BOT_SCENARIO_TRIALS", _environment_value, _platform_all,
+		"Trials of each scenario at each skill (1 to 100); variants take turns." },
+	{ "debug.bot_scenario_seed", _config_integer, "1", "HALO_BOT_SCENARIO_SEED", _environment_value, _platform_all,
+		"The scenarios' random seed: the same seed gives the bots the same numbers." },
+	{ "debug.bot_scenario_log", _config_string, "\"\"", "HALO_BOT_SCENARIO_LOG", _environment_value, _platform_all,
+		"The JSON-lines telemetry (every tick of every subject): a .jsonl file in\n"
+		"paths.data (absolute paths are taken inside it too); empty for none." },
+	{ "debug.bot_scenario_camera", _config_string, "\"follow\"", "HALO_BOT_SCENARIO_CAMERA", _environment_value, _platform_all,
+		"How a scenario is watched: \"follow\" (behind the bot), \"overview\" (the whole\n"
+		"arena), \"first_person\" (the bot's eyes) or \"off\" (the host's own view)." },
+	{ "debug.bot_scenario_origin", _config_string, "\"\"", "HALO_BOT_SCENARIO_ORIGIN", _environment_value, _platform_all,
+		"The arena's center \"x,y\" (and the height \"x,y,z\" its ground probes start at);\n"
+		"empty uses the map's own (Blood Gulch only)." },
+	{ "debug.bot_scenario_crowd", _config_integer, "8", "HALO_BOT_SCENARIO_CROWD", _environment_value, _platform_all,
+		"Bots in the crowd scenario, S10 (2 to 24)." },
+	{ "debug.bot_scenario_exit", _config_boolean, "false", "HALO_BOT_SCENARIO_EXIT", _environment_set_is_true, _platform_all,
+		"Quit the game once every scenario trial has run." },

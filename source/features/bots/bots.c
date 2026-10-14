@@ -92,6 +92,9 @@ Configuration (port/linux/src/port_config.c): bots.count (0..31), bots.skill.
 #include "vehicle_navigation.h" /* port: routes for driven vehicles */
 #include "navigation_world.h"
 #include "map_anchors.h"
+#include "bot_scenario.h" /* port: debug.bot_scenario's controlled trials */
+
+#include <time.h>
 
 #ifdef HALO_FEATURE_BOTS
 
@@ -174,6 +177,9 @@ typedef char bot_player_slots_check[
 /* every bot number (slot + 1) has its own route search client */
 typedef char bot_navigation_clients_check[
 	BOTS_MAXIMUM <= BOT_NAVIGATION_AGENTS_MAX ? 1 : -1];
+/* a scenario's bots are bots of this table */
+typedef char bot_scenario_slots_check[
+	BOT_SCENARIO_BOTS_MAX <= BOTS_MAXIMUM ? 1 : -1];
 
 /* the behavior tree's leaves; a leaf's utility option is its id less one */
 enum
@@ -444,6 +450,9 @@ struct bot
 	boolean moved_last_tick;
 	long crouch_until;
 	long crouch_next_time;
+	/* port: the trigger and controls of its last action, for scenarios */
+	real last_trigger;
+	unsigned long last_control_flags;
 
 	/* navigation */
 	boolean searching;
@@ -670,6 +679,10 @@ void bots_initialize_for_new_map(
 	bot_manager_reset();
 	bots_globals.epoch++;
 	bots_globals.desired_count = (short)PIN(count, 0, BOTS_MAXIMUM);
+	/* port: a scenario run has exactly the bots its trials use */
+	bot_scenario_initialize_for_new_map();
+	if (bot_scenario_enabled())
+		bots_globals.desired_count = bot_scenario_bot_count();
 	bots_globals.skill = &bot_skills[1];
 	for (skill_index = 0; skill_index < NUMBEROF(bot_skills); skill_index++)
 	{
@@ -714,15 +727,22 @@ void bots_update(
 		return;
 	}
 	bots_join();
+	/* port: a scenario places its bots before they decide */
+	bot_scenario_update();
 	bot_manager_update();
 	/* (the shared route searches advance before the bots decide, so that a
 	route found this tick is followed this tick) */
-	bot_navigation_update();
-	vehicle_navigation_update();
-	for (bot_index = 0; bot_index < BOTS_MAXIMUM; bot_index++)
 	{
-		if (bots_globals.bots[bot_index].active)
-			bot_think(&bots_globals.bots[bot_index]);
+		clock_t before = clock();
+
+		bot_navigation_update();
+		vehicle_navigation_update();
+		for (bot_index = 0; bot_index < BOTS_MAXIMUM; bot_index++)
+		{
+			if (bots_globals.bots[bot_index].active)
+				bot_think(&bots_globals.bots[bot_index]);
+		}
+		bot_scenario_end_tick(1000.0 * (double)(clock() - before) / CLOCKS_PER_SEC);
 	}
 }
 
@@ -1235,7 +1255,8 @@ static void bot_perceive(
 
 		if (orienting ||
 			!bot_players_are_enemies(player, bot->player_index, other, iterator.datum_index) ||
-			!bot_living_unit(other->unit_index))
+			!bot_living_unit(other->unit_index) ||
+			bot_scenario_ignores_player(iterator.datum_index)) /* port: outside a scenario's trial */
 		{
 			continue;
 		}
@@ -1282,7 +1303,8 @@ static void bot_perceive(
 			struct player_datum *attacking_player;
 
 			if (attacker->player_index == NONE ||
-				now - (long)attacker->game_time_stamp > BOT_ATTACKER_AWARENESS_TICKS)
+				now - (long)attacker->game_time_stamp > BOT_ATTACKER_AWARENESS_TICKS ||
+				bot_scenario_ignores_player(attacker->player_index))
 			{
 				continue;
 			}
@@ -3424,7 +3446,8 @@ static real bot_confidence(
 		{
 			struct unit_datum *other_unit;
 
-			if (iterator.datum_index == bot->player_index || other->team_index != player->team_index)
+			if (iterator.datum_index == bot->player_index || other->team_index != player->team_index ||
+				bot_scenario_ignores_player(iterator.datum_index))
 				continue;
 			other_unit = bot_living_unit(other->unit_index);
 			if (other_unit && distance3d(&other_unit->object.position, &unit->object.position) < tuning->teammate_radius)
@@ -4383,7 +4406,97 @@ static void bot_submit_action(
 	action.desired_zoom_level = NONE;
 	bot_control_grenade(bot, &action);
 	bot_control_weapon(bot, &action);
+	bot->last_trigger = action.primary_trigger;
+	bot->last_control_flags = action.control_flags;
 	update_server_set_player_action(bot->player_index, &action);
+}
+
+/* port: a scenario's goal (debug.bot_scenario's route test): the bot walks
+its own BSP route there, as a pursuit would, with the same recovery and
+steering, and does nothing else */
+static short bot_scenario_walk(
+	struct bot *bot,
+	real_point3d const *goal)
+{
+	struct bot_navigation_command command;
+	struct sn_point point;
+	enum bot_navigation_result result;
+
+	csmemset(&bot->pending, 0, sizeof(bot->pending));
+	point.x = goal->x;
+	point.y = goal->y;
+	point.z = goal->z;
+	result = bot_navigation_agent_move_to(&bot->navigation_agent, bot->unit_index, point, 1.f, 0.6f, &command);
+	if (result == BOT_NAVIGATION_MOVING && command.has_move)
+	{
+		bot->pending.has_move = TRUE;
+		bot->pending.move_yaw = bot_angle_normalize(command.yaw);
+		bot->pending.move_speed = PIN(command.speed, 0.f, 1.f);
+		bot->pending.has_look = TRUE;
+		bot->pending.look.yaw = bot->pending.move_yaw;
+		bot->pending.look.pitch = 0.f;
+	}
+	if (command.jump)
+		bot->pending.control_flags |= FLAG(_unit_control_jump_bit);
+	/* (arrived: standing on purpose, not a stall to escape) */
+	bot->objective_waiting = result == BOT_NAVIGATION_ARRIVED;
+	bot_submit_action(bot);
+	return (short)result;
+}
+
+/* port: what a scenario logs of a subject's tick */
+static void bot_scenario_report(
+	struct bot *bot,
+	short navigation_result)
+{
+	struct bot_scenario_observation observation;
+	uint32_t leaf = bot->behavior.running_node < NUMBEROF(bot_behavior_nodes) ?
+		bot_behavior_nodes[bot->behavior.running_node].leaf_id : 0;
+	short index;
+
+	csmemset(&observation, 0, sizeof(observation));
+	observation.slot = bot->slot;
+	observation.leaf_name = navigation_result != NONE ? "goal" :
+		bot_leaf_names[leaf < NUMBEROF(bot_leaf_names) ? leaf : 0];
+	for (index = 0; index < BOT_SCENARIO_SCORES && index < BOT_BEHAVIOR_COUNT; index++)
+		observation.scores[index] = bot->scores[index];
+	observation.confidence = bot->confidence;
+	observation.target_player_index = bot->target_player_index;
+	observation.target_source = bot->target_source;
+	observation.target_visible = bot->target_visible;
+	observation.aware = game_time_get() >= bot->aware_time;
+	observation.target_belief = bot->target_last_position;
+	observation.facing = bot->facing;
+	observation.has_look = bot->pending.has_look;
+	observation.look = bot->pending.look;
+	observation.has_move = bot->pending.has_move;
+	observation.move_yaw = bot->pending.move_yaw;
+	observation.move_speed = bot->pending.move_speed;
+	observation.trigger = bot->last_trigger;
+	observation.control_flags = bot->last_control_flags;
+	observation.strafe_sign = bot->strafe_sign;
+	observation.route_searching = bot->navigation_agent.searching;
+	observation.route_following = bot->navigation_agent.following;
+	observation.route_waypoint = (short)MIN(bot->navigation_agent.waypoint, 32767u);
+	observation.route_count = 0;
+	if (bot->navigation_agent.following)
+	{
+		uint32_t point;
+
+		/* (from its place, the points still ahead) */
+		object_get_origin(bot->unit_index, &observation.route[observation.route_count++]);
+		for (point = bot->navigation_agent.waypoint; point < bot->navigation_agent.route.count &&
+			observation.route_count < BOT_SCENARIO_ROUTE_POINTS; point++)
+		{
+			real_point3d *to = &observation.route[observation.route_count++];
+
+			to->x = bot->navigation_agent.route.points[point].x;
+			to->y = bot->navigation_agent.route.points[point].y;
+			to->z = bot->navigation_agent.route.points[point].z + 0.1f;
+		}
+	}
+	observation.navigation_result = navigation_result;
+	bot_scenario_observe(&observation);
 }
 
 /* ---------- private code: a bot's tick */
@@ -4720,6 +4833,27 @@ static void bot_think(
 	if (player->unit_index != bot->unit_index)
 		bot_reset_life(bot, player->unit_index);
 
+	/* port: a scenario holds its bots between trials, scripts its targets, and
+	sends a route test's subject to its goal (bot_scenario.h) */
+	{
+		struct player_action scenario_action;
+		real_point3d scenario_goal;
+
+		switch (bot_scenario_control(bot->slot, &scenario_action, &scenario_goal))
+		{
+		case _bot_scenario_control_action:
+			bot->facing = scenario_action.desired_facing;
+			update_server_set_player_action(bot->player_index, &scenario_action);
+			return;
+		case _bot_scenario_control_goal:
+			bot->objective_waiting = FALSE;
+			bot_scenario_report(bot, bot_scenario_walk(bot, &scenario_goal));
+			return;
+		default:
+			break;
+		}
+	}
+
 	/* Geometry acceptance probe takes only Bot 1, after the normal authority,
 	   lifecycle and unit-control gates. Normal tactics/spawns stay unchanged. */
 	if (bot->slot == 0)
@@ -4805,6 +4939,8 @@ static void bot_think(
 	engine_ai_intent_execute(&bot->batch, &tick, &bot->report, bot, bot_execute_intent);
 	bot_hear_human_alert(bot, player->team_index); /* port: directional cue only */
 	bot_submit_action(bot);
+	if (bot_scenario_enabled())
+		bot_scenario_report(bot, NONE);
 
 	/* (what it is doing, every ten seconds, to the log) */
 	if (game_time_get() % (10 * TICKS_PER_SECOND) == bot->slot * 7)
@@ -5002,6 +5138,9 @@ static char bots_match_team(short bot_index)
 	struct player_datum *host;
 	short team;
 
+	/* port: a scenario's slots have fixed teams (bot_scenario_team) */
+	if (bot_scenario_enabled() && game_engine_has_teams())
+		return bot_scenario_team(bot_index);
 	if (lobby_friendly_count == NONE || !game_engine_has_teams())
 		return bots_choose_team();
 	host = player_try_and_get(local_player_get_player_index(0));
@@ -5016,8 +5155,8 @@ player is published to the update pipeline or gets a body. */
 static void bots_player_added(long player_index, short bot_index)
 {
 	game_engine_player_added(player_index);
-	if (lobby_friendly_count != NONE && game_connection() == _game_connection_local &&
-		game_engine_has_teams())
+	if (((lobby_friendly_count != NONE && game_connection() == _game_connection_local) ||
+		bot_scenario_enabled()) && game_engine_has_teams())
 	{
 		struct player_datum *player = player_try_and_get(player_index);
 		if (player)
@@ -5108,6 +5247,72 @@ static void bot_leave(
 	platform_log("bots: a bot left (solo Slayer host gate no longer permits bots)");
 }
 
+/* ---------- scenario fixture (bot_scenario.h) */
+
+long bots_scenario_player_index(
+	short slot)
+{
+	struct bot *bot;
+
+	if (slot < 0 || slot >= BOTS_MAXIMUM)
+		return NONE;
+	bot = &bots_globals.bots[slot];
+	return bot->active && bot_player(bot) ? bot->player_index : NONE;
+}
+
+/* a trial's start: the last life's decisions, target, route and claims go;
+the bot faces yaw, alert at once, its numbers from seed */
+boolean bots_scenario_prepare(
+	short slot,
+	real yaw,
+	uint32_t seed)
+{
+	struct bot *bot;
+	struct player_datum *player;
+
+	if (slot < 0 || slot >= BOTS_MAXIMUM || !bots_globals.bots[slot].active)
+		return FALSE;
+	bot = &bots_globals.bots[slot];
+	player = bot_player(bot);
+	if (!player || !bot_living_unit(player->unit_index))
+		return FALSE;
+	engine_ai_rng32_seed(&bot->rng, (uint64_t)seed, (uint64_t)slot);
+	bot_reset_life(bot, player->unit_index);
+	bot->facing.yaw = bot_angle_normalize(yaw);
+	bot->facing.pitch = 0.f;
+	bot->orient_yaw = bot->facing.yaw;
+	bot->movement_escape_yaw = bot->facing.yaw;
+	bot->aware_time = game_time_get();
+	bot->strafe_sign = 1.f;
+	bot->last_trigger = 0.f;
+	bot->last_control_flags = 0;
+	csmemset(bot->scores, 0, sizeof(bot->scores));
+	return TRUE;
+}
+
+/* a trial's start: no team sighting, claim or callout from the last trial */
+void bots_scenario_forget(
+	void)
+{
+	bot_manager_reset();
+}
+
+boolean bots_scenario_set_skill(
+	char const *name)
+{
+	short skill_index;
+
+	for (skill_index = 0; skill_index < NUMBEROF(bot_skills); skill_index++)
+	{
+		if (name && !csstrcasecmp(name, bot_skills[skill_index].name))
+		{
+			bots_globals.skill = &bot_skills[skill_index];
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 /* ---------- extension registration (source/extensions/extension_api.h) */
 
 /* each tick, before the players' actions: the navigation world first, then
@@ -5169,6 +5374,14 @@ static real bots_starting_location_rating(
 		1.f : BOT_ENEMY_HALF_SPAWN_RATING;
 }
 
+/* the map left: its derived navigation, and a scenario's arena */
+static void bots_dispose_from_old_map(
+	void)
+{
+	bot_scenario_dispose_from_old_map();
+	bots_navigation_reset();
+}
+
 static struct halo_player_controller const bots_controller =
 {
 	.update = bots_controller_update,
@@ -5183,12 +5396,17 @@ struct halo_extension const bots_extension =
 	.objects_placed = bots_initialize_for_new_map,
 	/* derived, host-local navigation never outlives its map, a restored
 	game or the tags it was built from */
-	.dispose_from_old_map = bots_navigation_reset,
+	.dispose_from_old_map = bots_dispose_from_old_map,
 	.invalidate_derived_state = bots_navigation_reset,
 	/* a game bots played in is not reported to the game list, Delta Stats
 	or the event log */
 	.suppress_game_report = bots_game_had_bots,
 	.player_controller = &bots_controller,
+#ifdef HALO_EXTENSION_WORLD_GEOMETRY
+	/* port: debug.bot_scenario's arena, and its camera and overlay */
+	.editor = &bot_scenario_editor,
+	.world_geometry = &bot_scenario_geometry,
+#endif
 };
 
 #endif /* HALO_FEATURE_BOTS */

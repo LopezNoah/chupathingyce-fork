@@ -19,6 +19,7 @@
 #include "physics/physics.h"
 #include "cache/cache_files.h"
 #include "extensions/extension_api.h"
+#include "bot_scenario.h" /* port: a scenario arena's floor polygons */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -209,6 +210,10 @@ static int read_surface(void *context, uint32_t index, struct sn_polygon *out)
     uint32_t count;
     (void)context;
     if (!structure || structure->collision_bsp.count!=1) return -1;
+    /* port: after the BSP's surfaces, a scenario arena's floor (bot_scenario.h) */
+    if (structure->pathfinding_surfaces.count>=0 && index>=(uint32_t)structure->pathfinding_surfaces.count)
+        return bot_scenario_navigation_surface(index-(uint32_t)structure->pathfinding_surfaces.count,
+            (uint32_t)structure->pathfinding_surfaces.count,out);
     bsp=TAG_BLOCK_GET_ELEMENT(&structure->collision_bsp,0,struct collision_bsp);
     if (index>=(uint32_t)bsp->surfaces.count || index>=(uint32_t)structure->pathfinding_surfaces.count) return -1;
     flags=xbox_pointer(structure->pathfinding_surfaces.address);
@@ -321,8 +326,14 @@ static void layer_build(struct nav_layer *l, char const *name, struct sn_agent a
         l->staging=l->active==0 ? 1 : 0;
         if (l->active>=0 && l->resources[l->staging]==l->resources[l->active]) l->active=-1;
         if (!source_valid(structure)) { l->status=SN_INVALID; platform_log("nav: invalid BSP source blocks"); return; }
-        l->status=sn_build_begin(&l->build,l->resources[l->staging],
-            (uint32_t)structure->pathfinding_surfaces.count,key,++world.revision,agent);
+        /* (source_valid kept the BSP's count within SN_SOURCE_MAX; the arena's
+        few polygons follow it only while the total fits) */
+        {
+            uint32_t sources=(uint32_t)structure->pathfinding_surfaces.count;
+            uint32_t extra=bot_scenario_navigation_surface_count();
+            if (extra<=SN_SOURCE_MAX-sources) sources+=extra;
+            l->status=sn_build_begin(&l->build,l->resources[l->staging],sources,key,++world.revision,agent);
+        }
         platform_log("nav: build %s BSP %d, radius %.3f height %.3f normal-k %.3f, source surfaces %ld",
             name,global_structure_bsp_index,agent.radius,agent.height,agent.minimum_normal_z,
             structure->pathfinding_surfaces.count);

@@ -1,5 +1,10 @@
 # Terminal bot tests and flags
 
+Controlled, watched behavior trials in a test arena (open-field contact,
+line-of-sight memory, routes, low shields, pickups, team sightings, strafing,
+unseen attackers, crowds) are in [bot-scenarios.md](bot-scenarios.md):
+`python3 tools/run_bot_scenarios.py`.
+
 Run all commands from the repository root. Python 3, clang, Ninja and the
 platform build dependencies are required. Standalone runners do not need pytest
 or game assets.
@@ -19,6 +24,7 @@ python3 tools/test_bot_awareness_log.py
 python3 tools/test_bot_perception_steering.py --sanitize
 python3 tools/test_bot_fire_safety.py --sanitize
 python3 tools/test_human_callouts.py --sanitize
+python3 -m pytest -q tools/test_bot_scenarios.py
 cc -std=c99 -Wall -Wextra -Werror -fsanitize=address,undefined \
   tools/test_engine_ai_fire_control.c source/engine_ai/fire_control.c \
   -o /tmp/test-bot-fire
