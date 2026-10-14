@@ -48,6 +48,10 @@ with), the desktop's link handler, Discord.
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+/* (the tests' host: its getentropy is declared here) */
+#include <sys/random.h>
+#endif
 
 #include "posix.h"
 
