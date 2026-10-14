@@ -93,6 +93,7 @@ their handlers open opens.
 /* (its games on Halo PC maps: server_browser.c) */
 #include "halo_map_families.h"
 #include "halo_server_browser.h"
+#include "halo_ui_map_list.h"
 #if defined(HALO_FEATURE_BOTS) && defined(HALO_GAME_BROWSER)
 #include "features/bots/bot_lobby.h"
 #endif
@@ -982,6 +983,7 @@ enum
 {
 	MAP_KIND_SINGLEPLAYER,
 	MAP_KIND_MULTIPLAYER,
+	MAP_KIND_CUSTOM_SINGLEPLAYER,
 	NUMBER_OF_MAP_KINDS
 };
 
@@ -1068,6 +1070,41 @@ static void multiplayer_map_text(short map, wchar_t *text)
 	string_get("pc\\main_menu\\mp_map_list", map, text);
 }
 
+static short map_kind_count(short kind, short multiplayer_map_count)
+{
+	return kind == MAP_KIND_SINGLEPLAYER ? NUMBER_OF_SINGLE_PLAYER_LEVELS :
+		kind == MAP_KIND_CUSTOM_SINGLEPLAYER ? (short)ui_map_campaign_count() : multiplayer_map_count;
+}
+
+static short map_kind_display_index(short kind, short entry)
+{
+	return kind == MAP_KIND_CUSTOM_SINGLEPLAYER ? ui_map_campaign_display_index(entry) : entry;
+}
+
+static char const *custom_campaign_map_name(short entry)
+{
+	char **names = ui_map_campaign_names();
+
+	return entry >= 0 && entry < ui_map_campaign_count() ? names[entry] : NULL;
+}
+
+static void custom_campaign_map_text(short map, wchar_t *text)
+{
+	short display_index = ui_map_campaign_display_index(map);
+	short string_index = ui_map_campaign_string_index(display_index, _ui_map_list_string_name);
+	wchar_t const *name = string_index != NONE ? ui_map_list_text(string_index) : NULL;
+	short index;
+
+	if (name)
+	{
+		for (index = 0; index < ROW_TEXT_LENGTH - 1 && name[index]; index++)
+			text[index] = name[index];
+		text[index] = 0;
+		return;
+	}
+	text[0] = 0;
+}
+
 /* the description's map (each list's has both kinds' widgets): a campaign
 level's picture, name and words (level_description sets them), or a
 multiplayer map's, or (both NONE) neither */
@@ -1075,6 +1112,7 @@ static void map_description_show(struct widget_instance *description, short leve
 {
 	struct widget_instance *widget;
 	short marker;
+	char const *campaign_map;
 
 	visible_set(named(description, "replay_level_right_name", 0), level != NONE);
 	visible_set(named(description, "replay_level_right_pic", 0), level != NONE);
@@ -1089,6 +1127,20 @@ static void map_description_show(struct widget_instance *description, short leve
 	}
 	if (map == NONE)
 		return;
+	campaign_map = ui_map_campaign_map_name(map);
+	if (campaign_map)
+	{
+		short name_index = ui_map_campaign_string_index(map, _ui_map_list_string_name);
+		short description_index = ui_map_campaign_string_index(map, _ui_map_list_string_description);
+
+		if ((widget = named(description, "mp_map_right_name", 0)) != NULL)
+			widget->parameters.text_box.string_list_index = name_index;
+		if ((widget = named(description, "mp_map_right_pic", 0)) != NULL)
+			widget->animation.current_frame_index = ui_map_campaign_picture_index(map);
+		if ((widget = named(description, "mp_map_right_data", 0)) != NULL)
+			widget->parameters.text_box.string_list_index = description_index;
+		return;
+	}
 	if ((widget = named(description, "mp_map_right_name", 0)) != NULL)
 		widget->parameters.text_box.string_list_index = map;
 	if ((widget = named(description, "mp_map_right_pic", 0)) != NULL)
@@ -1125,6 +1177,7 @@ static boolean level_list_initialize(struct widget_instance *list, short control
 		level = 0;
 	campaign.shown_level = level;
 	level_list.map_count = ui_widget_port_multiplayer_maps(&level_list.map_names, &last_used);
+	ui_map_list_refresh(level_list.map_names);
 	level_list.kind = MAP_KIND_SINGLEPLAYER;
 	level_list.chosen = level;
 	level_list.first = map_kind_first(level, NUMBER_OF_SINGLE_PLAYER_LEVELS);
@@ -1149,14 +1202,16 @@ static void level_list_update(struct widget_instance *list)
 		level_list.kind = kind;
 		level_list.first = level_list.chosen = 0;
 	}
-	count = kind == MAP_KIND_SINGLEPLAYER ? NUMBER_OF_SINGLE_PLAYER_LEVELS : level_list.map_count;
+	count = map_kind_count(kind, level_list.map_count);
 	entry = map_kind_rows_update(list, &level_list.first, count,
-		kind == MAP_KIND_SINGLEPLAYER ? level_row_text : multiplayer_map_text);
+		kind == MAP_KIND_SINGLEPLAYER ? level_row_text :
+		kind == MAP_KIND_CUSTOM_SINGLEPLAYER ? custom_campaign_map_text : multiplayer_map_text);
 	if (entry != NONE)
 		level_list.chosen = entry;
-	if (kind == MAP_KIND_MULTIPLAYER)
+	if (kind != MAP_KIND_SINGLEPLAYER)
 	{
-		map_description_show(description, NONE, level_list.chosen < count ? level_list.chosen : NONE);
+		map_description_show(description, NONE,
+			level_list.chosen < count ? map_kind_display_index(kind, level_list.chosen) : NONE);
 		profile_name_show(description);
 		return;
 	}
@@ -1176,6 +1231,16 @@ static boolean level_choose(short controller)
 {
 	short level = campaign.shown_level;
 
+	if (level_list.kind == MAP_KIND_CUSTOM_SINGLEPLAYER)
+	{
+		char const *map_name = custom_campaign_map_name(level_list.chosen);
+
+		if (!map_name)
+			return campaign_fail();
+		main_set_map_name(map_name);
+		main_defer_map_map_change();
+		return TRUE;
+	}
 	if (level_list.kind == MAP_KIND_MULTIPLAYER)
 	{
 		struct player_profile profile;
@@ -1206,7 +1271,7 @@ static boolean difficulty_start(short difficulty, short controller)
 
 	if (!campaign_profile(controller, &profile))
 		return campaign_fail();
-	if (!map_name || main_get_solo_level_from_name(map_name) == NONE)
+	if (!map_name || (main_get_solo_level_from_name(map_name) == NONE && ui_map_campaign_find(map_name) == NONE))
 		map_name = main_get_solo_level_name(0);
 	campaign_start(map_name, PIN(difficulty, 0, 3), controller);
 	return TRUE;
@@ -2447,7 +2512,7 @@ static short map_step_count(void)
 {
 	if (map_list.step == MAP_STEP_DIFFICULTIES)
 		return NUMBER_OF_GAME_DIFFICULTY_LEVELS;
-	return map_list.kind == MAP_KIND_SINGLEPLAYER ? NUMBER_OF_SINGLE_PLAYER_LEVELS : map_list.map_count;
+	return map_kind_count(map_list.kind, map_list.map_count);
 }
 
 /* opens a step at the entry given */
@@ -2480,6 +2545,7 @@ static boolean map_list_initialize(struct widget_instance *list)
 
 	map_list.hosting = global_network_game_server_get() != NULL && !network_game_is_splitscreen_local();
 	map_list.map_count = ui_widget_port_multiplayer_maps(&names, &last_used);
+	ui_map_list_refresh(names);
 	map_list.kind = MAP_KIND_MULTIPLAYER;
 	map_kind_set(list, map_list.kind);
 	map_step_open(list, MAP_STEP_MAPS, last_used);
@@ -2491,7 +2557,7 @@ them the level or map chosen: its picture, name and words */
 static void map_list_update(struct widget_instance *list)
 {
 	struct widget_instance *description = list->parameters.list.extended_description;
-	short kind = map_kind_shown(list, map_list.hosting ? NONE : MAP_KIND_MULTIPLAYER), count, entry;
+	short kind = map_kind_shown(list, map_list.hosting ? NONE : MAP_KIND_MULTIPLAYER), count, entry, shown;
 
 	if (kind != map_list.kind)
 	{
@@ -2501,20 +2567,21 @@ static void map_list_update(struct widget_instance *list)
 	}
 	count = map_step_count();
 	entry = map_kind_rows_update(list, &map_list.first, count, map_list.step == MAP_STEP_DIFFICULTIES ?
-		map_difficulty_text : kind == MAP_KIND_SINGLEPLAYER ? map_level_text : multiplayer_map_text);
+		map_difficulty_text : kind == MAP_KIND_SINGLEPLAYER ? map_level_text :
+		kind == MAP_KIND_CUSTOM_SINGLEPLAYER ? custom_campaign_map_text : multiplayer_map_text);
 	if (entry != NONE)
 		map_list.chosen = entry;
 	visible_set(named(description, "mp_map_right_item", 0), map_list.chosen < count);
-	if (map_list.step == MAP_STEP_DIFFICULTIES || kind == MAP_KIND_SINGLEPLAYER)
+	shown = map_list.step == MAP_STEP_DIFFICULTIES ? map_list.level : map_list.chosen;
+	if (kind == MAP_KIND_SINGLEPLAYER)
 	{
-		short level = map_list.step == MAP_STEP_DIFFICULTIES ? map_list.level : map_list.chosen;
-
-		map_description_show(description, level, NONE);
-		level_description(description, "replay_level", level, FALSE, NULL, NONE);
+		map_description_show(description, shown, NONE);
+		level_description(description, "replay_level", shown, FALSE, NULL, NONE);
 	}
 	else
 	{
-		map_description_show(description, NONE, map_list.chosen < count ? map_list.chosen : NONE);
+		map_description_show(description, NONE, map_list.chosen < count || map_list.step == MAP_STEP_DIFFICULTIES ?
+			map_kind_display_index(kind, shown) : NONE);
 	}
 	profile_name_show(description);
 }
@@ -2539,8 +2606,11 @@ static boolean map_list_choose(struct widget_instance *list, boolean *widget_del
 			return campaign_fail();
 		}
 #endif
+		char const *map_name = map_list.kind == MAP_KIND_SINGLEPLAYER ? main_get_solo_level_name(map_list.level) :
+			custom_campaign_map_name(map_list.level);
+
 		/* the co-op game set up, then Server Setup in the gametypes' place */
-		if (!ui_widget_port_cooperative_level_choose(main_get_solo_level_name(map_list.level), chosen))
+		if (!map_name || !ui_widget_port_cooperative_level_choose(map_name, chosen))
 			return campaign_fail();
 		return ui_widget_port_open(list, SERVER_SETUP_NAME, widget_deleted);
 	}
@@ -2729,11 +2799,19 @@ static void game_name_done(char const *text)
 	multiplayer.game_name[index] = 0;
 }
 
-/* Whether a network game is co-op: a campaign level with no game engine
-(set up by ui_widget_port_cooperative_level_choose). */
+/* Whether a network game is co-op: a campaign level or a Custom Edition
+solo scenario with no game engine (ui_widget_port_cooperative_level_choose). */
 static boolean game_cooperative(struct network_game const *game)
 {
-	return game && !game->variant.game_engine_index && main_get_solo_level_from_name(game->map.name) != NONE;
+	short family;
+
+	if (!game || game->variant.game_engine_index)
+		return FALSE;
+	if (main_get_solo_level_from_name(game->map.name) != NONE)
+		return TRUE;
+	family = map_family_parse(game->map.name, NULL, 0);
+	return family == _map_family_custom_edition &&
+		(ui_map_campaign_find(game->map.name) != NONE || ui_map_list_find(game->map.name) == NONE);
 }
 
 /* the same, for the game this machine is hosting */
@@ -3251,6 +3329,18 @@ static void map_display_name(char const *map_name, wchar_t *text)
 	if ((index = campaign_level_of(map_name)) != NONE)
 	{
 		string_get("pc\\main_menu\\map_list", index, text);
+		return;
+	}
+	index = ui_map_campaign_find(map_name);
+	if (index != NONE)
+	{
+		short string_index = ui_map_campaign_string_index(index, _ui_map_list_string_lobby_name);
+		wchar_t const *name = ui_map_list_text(string_index);
+		short character;
+
+		for (character = 0; name && name[character] && character < ROW_TEXT_LENGTH - 1; character++)
+			text[character] = name[character];
+		text[character] = 0;
 		return;
 	}
 	for (index = 0; map_name[index] && index < ROW_TEXT_LENGTH - 1; index++)

@@ -5,12 +5,13 @@ The families of maps the native builds play, by their names' suffixes, and
 where each family's files are (halo_map_families.h). The names are read on
 every build (the server browser names a game's map on builds that cannot
 play it); the files are looked for only on the builds that play such maps
-(HALO_CUSTOM_EDITION).
+(HALO_CUSTOM_EDITION). Custom Edition's multiplayer scenarios and solo
+campaign scenarios are listed separately by their cache-header type.
 */
 
 #include "cseries.h"
-#include "cseries/cseries_windows.h"
-#include "halo_map_families.h"
+#include "cseries/cseries_windows.h" // IWYU pragma: keep
+#include "../include/halo_map_families.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,9 +22,13 @@ enum
 {
 	/* a map file's name, at most (the menus' and the browser's) */
 	MAP_FAMILY_FILE_LENGTH = 64,
-	/* the file names one family's folders hold, at most, listed once each */
+	/* distinct map names retained per family */
 	MAXIMUM_LISTED_FILES = 256,
+	/* files examined in each legacy or current map folder per refresh */
+	MAXIMUM_FILES_SCANNED_PER_PLACE = 1024,
 };
+typedef char map_family_scan_capacity_covers_list[
+	MAXIMUM_FILES_SCANNED_PER_PLACE >= MAXIMUM_LISTED_FILES ? 1 : -1];
 
 /* ---------- globals */
 
@@ -179,11 +184,13 @@ short map_family_from_wire_name(
 
 enum
 {
-	/* a cache file's header: 'head', its version, ..., its type (a short
-	at 0x60: 1 multiplayer) */
+	/* a cache file's header: 'head', its version, ..., its scenario type
+	(a short at 0x60: 0 solo, 1 multiplayer) */
 	CACHE_HEADER_SIGNATURE = 'head',
 	CACHE_HEADER_TYPE_OFFSET = 0x60,
+	CACHE_TYPE_SOLO = 0,
 	CACHE_TYPE_MULTIPLAYER = 1,
+	CACHE_TYPE_ANY = -1,
 	CUSTOM_EDITION_CACHE_VERSION = 609,
 	HALO_PC_CACHE_VERSION = 7,
 };
@@ -286,12 +293,12 @@ static void place_folder(
 	snprintf(path, (size_t)size, "%s%s", place->under_maps ? cache_files_map_directory() : "d:\\", place->folder);
 }
 
-/* whether a file is a cache file of a version (and a multiplayer map's, if
-asked) */
+/* whether a file is a cache file of a version (and scenario type, unless
+CACHE_TYPE_ANY) */
 static boolean cache_file_is(
 	char const *path,
 	long version,
-	boolean multiplayer)
+	short scenario_type)
 {
 	unsigned long header[(CACHE_HEADER_TYPE_OFFSET + 4) / 4];
 	unsigned long bytes_read = 0;
@@ -303,7 +310,8 @@ static boolean cache_file_is(
 	if (ReadFile(file, header, sizeof(header), &bytes_read, NULL) && bytes_read == sizeof(header))
 	{
 		result = header[0] == CACHE_HEADER_SIGNATURE && header[1] == (unsigned long)version &&
-			(!multiplayer || (header[CACHE_HEADER_TYPE_OFFSET / 4] & 0xffff) == CACHE_TYPE_MULTIPLAYER);
+			(scenario_type == CACHE_TYPE_ANY ||
+			(short)(header[CACHE_HEADER_TYPE_OFFSET / 4] & 0xffff) == scenario_type);
 	}
 	CloseHandle(file);
 	return result;
@@ -363,15 +371,16 @@ boolean map_family_find(
 
 		place_folder(&places[index], folder, sizeof(folder));
 		snprintf(path, (size_t)size, "%s%s%s.map", folder, file, places[index].suffix);
-		if (cache_file_is(path, family_cache_version(family), FALSE))
+		if (cache_file_is(path, family_cache_version(family), CACHE_TYPE_ANY))
 			return TRUE;
 	}
 	path[0] = 0;
 	return FALSE;
 }
 
-void map_family_list(
+static void map_family_list_type(
 	short family,
+	short scenario_type,
 	void (*found)(char const *file, void *context),
 	void *context)
 {
@@ -386,6 +395,7 @@ void map_family_list(
 		char folder[256], pattern[288];
 		WIN32_FIND_DATAA data;
 		HANDLE find;
+		long files_scanned = 0;
 		size_t suffix_length = strlen(places[index].suffix);
 
 		place_folder(&places[index], folder, sizeof(folder));
@@ -396,8 +406,11 @@ void map_family_list(
 		do
 		{
 			char file[MAP_FAMILY_FILE_LENGTH], path[384];
-			size_t length = strlen(data.cFileName);
+			size_t length;
 			long other;
+
+			files_scanned++;
+			length = strlen(data.cFileName);
 
 			/* (<file><suffix>.map, its file's name not empty, and in a
 			place without a suffix not one named for a family: that is
@@ -418,14 +431,32 @@ void map_family_list(
 			if (other < listed_count || listed_count >= MAXIMUM_LISTED_FILES)
 				continue;
 			snprintf(path, sizeof(path), "%s%s", folder, data.cFileName);
-			if (!cache_file_is(path, family_cache_version(family), TRUE))
+			if (!cache_file_is(path, family_cache_version(family), scenario_type))
 				continue;
 			snprintf(listed[listed_count++], MAP_FAMILY_FILE_LENGTH, "%s", file);
 			found(file, context);
 		}
-		while (FindNextFileA(find, &data));
+		while (files_scanned < MAXIMUM_FILES_SCANNED_PER_PLACE && FindNextFileA(find, &data));
 		CloseHandle(find);
 	}
+}
+
+void map_family_list(
+	short family,
+	void (*found)(char const *file, void *context),
+	void *context)
+{
+	/* the map menus and the lobby list multiplayer maps only */
+	map_family_list_type(family, CACHE_TYPE_MULTIPLAYER, found, context);
+}
+
+void map_family_list_custom_campaign(
+	void (*found)(char const *file, void *context),
+	void *context)
+{
+	/* Campaign discovery is only defined for Custom Edition's scenario
+	format; Halo PC retail and HaloMD map families are unchanged. */
+	map_family_list_type(_map_family_custom_edition, CACHE_TYPE_SOLO, found, context);
 }
 
 #endif

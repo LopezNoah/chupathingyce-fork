@@ -6,7 +6,8 @@ the game (ui_widget_event_handler_functions.c's multiplayer level list): the
 Xbox's thirteen maps first, as they were, then the Custom Edition maps
 (Halo PC's, played as <name>@ce), each named with [CE], then HaloMD's maps
 (Halo PC retail's, played as <name>@md), each named with [MD]: each family
-in its folders (halo_map_families.h), in the order of their names.
+in its folders (halo_map_families.h), in the order of their names. A second,
+separate list holds Custom Edition solo scenarios for the campaign menus.
 
 A row past the Xbox's has no string or bitmap frame of its own in ui.map:
 its text comes from here, by a string list index of
@@ -36,7 +37,7 @@ asks whether the map is in its family's folders (ui_map_list_family_present).
 */
 
 #include "cseries.h"
-#include "cseries_windows.h"
+#include "cseries_windows.h" // IWYU pragma: keep
 #include "errors.h"
 
 #include <stdio.h>
@@ -188,7 +189,10 @@ enum
 	/* text boxes' string list indices from here are this list's: the row
 	times four, plus its string's kind */
 	UI_MAP_LIST_STRING_BASE = 0x4000,
+	UI_MAP_CAMPAIGN_STRING_BASE = 0x5000,
 	UI_MAP_LIST_STRINGS_PER_ROW = 4,
+	/* synthetic display indices for campaign maps, distinct from map rows */
+	UI_MAP_CAMPAIGN_DISPLAY_BASE = 0x1000,
 	/* bitmap frames from here are Halo PC's map pictures */
 	UI_MAP_LIST_PICTURE_BASE = 0x4000,
 
@@ -228,6 +232,9 @@ long bitmap_format_to_d3d_format(short format, word flags);
 static struct ui_map_entry ui_map_list[MAXIMUM_MAP_LIST];
 static char *ui_map_list_names_array[MAXIMUM_MAP_LIST];
 static long ui_map_list_count_value;
+static struct ui_map_entry ui_map_campaign_list[MAXIMUM_MAP_LIST];
+static char *ui_map_campaign_names_array[MAXIMUM_MAP_LIST];
+static long ui_map_campaign_count_value;
 
 /* what Halo PC's ui.map has of its map list, read once */
 static struct
@@ -532,11 +539,11 @@ static void add_entry(
 
 /* a Custom Edition or HaloMD map's row: its file's name (without its
 suffix or .map) */
-static void add_pc_entry(
+static void make_pc_entry(
+	struct ui_map_entry *entry,
 	short family,
 	char const *file)
 {
-	char map_name[MAP_NAME_LENGTH];
 	wchar_t name[DISPLAY_NAME_LENGTH];
 	wchar_t display_name[DISPLAY_NAME_LENGTH];
 	wchar_t lobby_name[DISPLAY_NAME_LENGTH];
@@ -597,8 +604,23 @@ static void add_pc_entry(
 	wide_append(display_name, DISPLAY_NAME_LENGTH, L"\r\n[");
 	wide_append(display_name, DISPLAY_NAME_LENGTH, mark);
 	wide_append(display_name, DISPLAY_NAME_LENGTH, L"]");
-	snprintf(map_name, sizeof(map_name), "%s%s", file, map_family_suffix(family));
-	add_entry(map_name, display_name, lobby_name, description, NONE, picture_index);
+	snprintf(entry->map_name, sizeof(entry->map_name), "%s%s", file, map_family_suffix(family));
+	wide_copy(entry->display_name, DISPLAY_NAME_LENGTH, display_name);
+	wide_copy(entry->lobby_name, DISPLAY_NAME_LENGTH, lobby_name);
+	wide_copy(entry->description, DESCRIPTION_LENGTH, description);
+	entry->xbox_index = NONE;
+	entry->picture_index = picture_index;
+}
+
+static void add_pc_entry(
+	short family,
+	char const *file)
+{
+	if (ui_map_list_count_value >= MAXIMUM_MAP_LIST)
+		return;
+	make_pc_entry(&ui_map_list[ui_map_list_count_value], family, file);
+	ui_map_list_names_array[ui_map_list_count_value] = ui_map_list[ui_map_list_count_value].map_name;
+	ui_map_list_count_value++;
 }
 
 /* the files found of a family's maps, while the list is filled */
@@ -623,20 +645,23 @@ static void file_found(
 /* the list anew: the Xbox's maps (the game's thirteen names, in its order),
 then the Custom Edition maps found, then HaloMD's, then Halo PC retail's */
 void ui_map_list_refresh(
-	char *const *xbox_maps)
+	char const *const *xbox_maps)
 {
 	static struct found_files found;
 	/* (the counts last logged, to log each change once) */
 	static long logged_counts[NUMBER_OF_MAP_FAMILIES] = { -1, -1, -1, -1 };
+	static long logged_campaign_count = -1;
+	extern int platform_ce_tag_cache_ready;
 	long counts[NUMBER_OF_MAP_FAMILIES] = { XBOX_MAP_COUNT, 0, 0, 0 };
+	long campaign_count = 0;
 	short index, family;
 
 	ui_map_list_count_value = 0;
+	ui_map_campaign_count_value = 0;
 	for (index = 0; index < XBOX_MAP_COUNT; index++)
 		add_entry(xbox_maps[index], L"", L"", L"", index, index);
 	for (family = _map_family_custom_edition; family < NUMBER_OF_MAP_FAMILIES; family++)
 	{
-		extern int platform_ce_tag_cache_ready;
 		long file;
 
 		/* (none of them would load without their tag cache, which the
@@ -653,11 +678,29 @@ void ui_map_list_refresh(
 			add_pc_entry(family, found.names[file]);
 		counts[family] = found.count;
 	}
-	if (memcmp(counts, logged_counts, sizeof(counts)))
+	if (platform_ce_tag_cache_ready)
+	{
+		long file;
+
+		found.count = 0;
+		map_family_list_custom_campaign(file_found, &found);
+		if (found.count)
+			ce_ui_read();
+		qsort(found.names, found.count, MAP_NAME_LENGTH, (int (*)(void const *, void const *))_stricmp);
+		for (file = 0; file < found.count && file < MAXIMUM_MAP_LIST; file++)
+		{
+			make_pc_entry(&ui_map_campaign_list[file], _map_family_custom_edition, found.names[file]);
+			ui_map_campaign_names_array[file] = ui_map_campaign_list[file].map_name;
+			ui_map_campaign_count_value++;
+		}
+		campaign_count = ui_map_campaign_count_value;
+	}
+	if (memcmp(counts, logged_counts, sizeof(counts)) || campaign_count != logged_campaign_count)
 	{
 		memcpy(logged_counts, counts, sizeof(counts));
-		error(_error_silent, "the menus' map list: %ld Custom Edition maps, %ld HaloMD maps, %ld Halo PC maps",
-			counts[_map_family_custom_edition], counts[_map_family_halomd], counts[_map_family_halo_pc]);
+		logged_campaign_count = campaign_count;
+		error(_error_silent, "the menus' map list: %ld Custom Edition maps (%ld campaign), %ld HaloMD maps, %ld Halo PC maps",
+			counts[_map_family_custom_edition], campaign_count, counts[_map_family_halomd], counts[_map_family_halo_pc]);
 	}
 }
 
@@ -665,6 +708,73 @@ long ui_map_list_count(
 	void)
 {
 	return ui_map_list_count_value;
+}
+
+long ui_map_campaign_count(
+	void)
+{
+	return ui_map_campaign_count_value;
+}
+
+char **ui_map_campaign_names(
+	void)
+{
+	return ui_map_campaign_names_array;
+}
+
+/* a campaign entry's display index, or NONE */
+short ui_map_campaign_display_index(
+	long row)
+{
+	if (row < 0 || row >= ui_map_campaign_count_value ||
+		row >= 0x7fff - UI_MAP_CAMPAIGN_DISPLAY_BASE)
+		return NONE;
+	return (short)(UI_MAP_CAMPAIGN_DISPLAY_BASE + row);
+}
+
+short ui_map_campaign_string_index(
+	short display_index,
+	short kind)
+{
+	long row = display_index - UI_MAP_CAMPAIGN_DISPLAY_BASE;
+
+	if (row < 0 || row >= ui_map_campaign_count_value || kind < 0 || kind >= UI_MAP_LIST_STRINGS_PER_ROW)
+		return NONE;
+	return (short)(UI_MAP_CAMPAIGN_STRING_BASE + row * UI_MAP_LIST_STRINGS_PER_ROW + kind);
+}
+
+/* the campaign entry whose level name matches, or NONE */
+short ui_map_campaign_find(
+	char const *map_name)
+{
+	long row;
+
+	if (!map_name)
+		return NONE;
+	for (row = 0; row < ui_map_campaign_count_value; row++)
+	{
+		if (!_stricmp(map_name, ui_map_campaign_list[row].map_name))
+			return ui_map_campaign_display_index(row);
+	}
+	return NONE;
+}
+
+/* a campaign entry's level name, or NULL */
+char const *ui_map_campaign_map_name(
+	short display_index)
+{
+	long row = display_index - UI_MAP_CAMPAIGN_DISPLAY_BASE;
+
+	return row >= 0 && row < ui_map_campaign_count_value ? ui_map_campaign_list[row].map_name : NULL;
+}
+
+/* the campaign entry's picture, or zero for an invalid display index */
+short ui_map_campaign_picture_index(
+	short display_index)
+{
+	long row = display_index - UI_MAP_CAMPAIGN_DISPLAY_BASE;
+
+	return row >= 0 && row < ui_map_campaign_count_value ? ui_map_campaign_list[row].picture_index : 0;
 }
 
 /* the rows' map names, for the list widget's items */
@@ -728,21 +838,31 @@ wchar_t const *ui_map_list_text(
 	short string_list_index)
 {
 	long row;
+	short kind;
 
+	if (string_list_index >= UI_MAP_CAMPAIGN_STRING_BASE)
+	{
+		row = (string_list_index - UI_MAP_CAMPAIGN_STRING_BASE) / UI_MAP_LIST_STRINGS_PER_ROW;
+		kind = (short)((string_list_index - UI_MAP_CAMPAIGN_STRING_BASE) % UI_MAP_LIST_STRINGS_PER_ROW);
+		if (row >= ui_map_campaign_count_value)
+			return NULL;
+		if (kind == _ui_map_list_string_description)
+			return ui_map_campaign_list[row].description;
+		if (kind == _ui_map_list_string_lobby_name)
+			return ui_map_campaign_list[row].lobby_name;
+		return ui_map_campaign_list[row].display_name;
+	}
 	if (string_list_index < UI_MAP_LIST_STRING_BASE)
 		return NULL;
 	row = (string_list_index - UI_MAP_LIST_STRING_BASE) / UI_MAP_LIST_STRINGS_PER_ROW;
 	if (row >= ui_map_list_count_value)
 		return NULL;
-	switch ((string_list_index - UI_MAP_LIST_STRING_BASE) % UI_MAP_LIST_STRINGS_PER_ROW)
-	{
-	case _ui_map_list_string_description:
+	kind = (short)((string_list_index - UI_MAP_LIST_STRING_BASE) % UI_MAP_LIST_STRINGS_PER_ROW);
+	if (kind == _ui_map_list_string_description)
 		return ui_map_list[row].description;
-	case _ui_map_list_string_lobby_name:
+	if (kind == _ui_map_list_string_lobby_name)
 		return ui_map_list[row].lobby_name;
-	default:
-		return ui_map_list[row].display_name;
-	}
+	return ui_map_list[row].display_name;
 }
 
 /* Halo PC's picture of a Custom Edition or HaloMD map, by its file's name:

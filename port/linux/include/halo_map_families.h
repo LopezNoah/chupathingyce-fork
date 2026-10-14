@@ -3,7 +3,9 @@ HALO_MAP_FAMILIES.H
 
 The families of maps the native builds play (port/linux/game/map_families.c),
 each named in playlists, the menus, the game list and Delta by a suffix to
-its file's name, and each with a folder of its own beside maps\:
+its file's name, and each with a folder of its own beside maps\. Custom
+Edition multiplayer maps and solo campaign maps are discovered by separate
+scenario-type filters.
 
   - the Xbox's own maps, in maps\ (a scenario's name or path, no suffix);
   - Halo PC's Custom Edition maps (cache version 609), played as <name>@ce:
@@ -75,7 +77,7 @@ short map_family_from_wire_name(char const *wire, char *map, long size);
 /* whether a map (as scenario_tags_load names it: <file>, <file>@ce, ...)
 came from a download, whose scripts are held to tighter rules (hs.c):
 marked by the downloader, or named by game.downloaded_maps */
-boolean map_is_downloaded(char const *map_name);
+unsigned char map_is_downloaded(char const *map_name);
 void map_downloaded_mark(char const *map_name);
 
 #ifdef HALO_CUSTOM_EDITION
@@ -86,17 +88,19 @@ long map_family_cache_version(short family);
 /* the path of a Custom Edition resource map (bitmaps, sounds, loc; or
 Halo PC's ui), in maps_ce or its older places: FALSE if there is none (path
 then the place it goes) */
-boolean map_family_resource(char const *name, char *path, long size);
+unsigned char map_family_resource(char const *name, char *path, long size);
 
 /* the file of a map of a family past the Xbox's (its file's name without
 the suffix), as cache_files_windows.c opens it: the path (for CreateFileA)
 of the first of the family's places that is a cache file of the family's
 version; FALSE if there is none */
-boolean map_family_find(short family, char const *file, char *path, long size);
+unsigned char map_family_find(short family, char const *file, char *path, long size);
 
 /* every multiplayer map of a family past the Xbox's, in its folders: each
 one's file's name (without the suffix, each once), passed to found */
 void map_family_list(short family, void (*found)(char const *file, void *context), void *context);
+/* Custom Edition's solo scenarios, for the campaign map lists */
+void map_family_list_custom_campaign(void (*found)(char const *file, void *context), void *context);
 #endif
 
 #endif

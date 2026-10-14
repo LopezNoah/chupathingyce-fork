@@ -6,11 +6,14 @@ The menus' list of multiplayer maps on the native builds
 Custom Edition maps, named with [CE], with Halo PC's names, descriptions and
 pictures of them, then HaloMD's maps, named with [MD] (halo_map_families.h).
 The multiplayer map list, its rows and the lobby (source/interface) ask it in
-place of the game's fixed thirteen.
+place of the game's fixed thirteen. A separate list supplies Custom Edition
+solo scenarios to New Game and the Map screen's campaign-map kind.
 */
 
 #ifndef HALO_UI_MAP_LIST_H
 #define HALO_UI_MAP_LIST_H
+
+#include <wchar.h> // IWYU pragma: keep
 
 struct bitmap_data;
 
@@ -27,8 +30,19 @@ enum
 };
 
 /* the list anew: the game's thirteen Xbox map names, then those found */
-void ui_map_list_refresh(char *const *xbox_maps);
+void ui_map_list_refresh(char const *const *xbox_maps);
 long ui_map_list_count(void);
+/* the solo Custom Edition maps for the campaign-kind rows, refreshed with
+ui_map_list_refresh */
+long ui_map_campaign_count(void);
+char **ui_map_campaign_names(void);
+/* a campaign row's distinct display index, string index, picture index,
+map name, or NONE/NULL when out of range */
+short ui_map_campaign_display_index(long row);
+short ui_map_campaign_string_index(short display_index, short kind);
+short ui_map_campaign_picture_index(short display_index);
+short ui_map_campaign_find(char const *map_name);
+char const *ui_map_campaign_map_name(short display_index);
 /* the rows' map names, for the list widget's items */
 char **ui_map_list_names(void);
 /* the row of a map's name, or NONE */
@@ -54,6 +68,6 @@ list's, or the file's made readable; every build), Halo PC's picture of it
 HALO_CUSTOM_EDITION) */
 void ui_map_list_family_name(short family, char const *file, wchar_t *name, long size);
 struct bitmap_data *ui_map_list_family_picture(short family, char const *file);
-boolean ui_map_list_family_present(short family, char const *file);
+unsigned char ui_map_list_family_present(short family, char const *file);
 
 #endif

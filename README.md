@@ -125,8 +125,11 @@ Where the game's `maps` folder is:
 Copy the `.map` files from your own Halo PC install. Include `bitmaps.map`,
 `sounds.map` and `loc.map` from Custom Edition in `maps_ce`: every Halo PC
 map reads them. Halo PC's own `ui.map` there adds its map names and
-pictures. The maps appear in the multiplayer map list after the Xbox maps,
-marked [CE], [MD] or [PC]. In Online Games, a game on a Halo PC map is
+pictures. Custom Edition multiplayer scenarios appear in the multiplayer map list
+marked [CE], [MD] or [PC], after the Xbox maps. Custom Edition solo scenarios
+also appear under **CUSTOM SINGLEPLAYER** in New Game and the network Map
+screen: they launch as campaign maps at the selected difficulty, and as
+co-op maps from the Map screen. In Online Games, a game on a Halo PC map is
 badged, and it can be joined only by players who have that map: the game
 says which file is missing and where it goes. The Xbox maps from your disc
 image are still needed. ChupathingyCE doesn't come with any of these files.
